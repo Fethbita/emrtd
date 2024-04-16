@@ -1,0 +1,4 @@
+[WARNING]
+====
+The Master List (ML) is taken from the https://www.bsi.bund.de/EN/Home/home_node.html[German BSI]. Instead of using this Master List, please get an up-to-date Master List from https://www.bsi.bund.de/EN/Themen/Oeffentliche-Verwaltung/Elektronische-Identitaeten/Public-Key-Infrastrukturen/CSCA/Root_Cert_Germany/Root_Certificate_node.html[The German CSCA]!
+====
