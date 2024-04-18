@@ -6,8 +6,11 @@
 //! eMRTDs and read the data that resides within them. With the help of openssl,
 //! it can perform Passive Authentication.
 //! 
+//! **NOTE:**
+//! Please note that this crate is provided 'as is' and is not considered production-ready. Use at your own risk.
+//! 
 //! Currently Active Authentication (AA), Chip Authentication (CA), PACE or EAC
-//! are *not* supported.
+//! are **not** supported.
 //!
 //! # Quick Start
 //!
