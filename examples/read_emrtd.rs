@@ -1,10 +1,10 @@
 use std::env;
 
-use emrtd::{
-    bytes2hex, get_jpeg_from_ef_dg2, other_mrz, parse_master_list, passive_authentication,
-    validate_dg, EmrtdComms, EmrtdError,
-};
+use emrtd::{bytes2hex, get_jpeg_from_ef_dg2, other_mrz, EmrtdComms, EmrtdError};
 use tracing::{error, info};
+
+#[cfg(feature = "passive_auth")]
+use emrtd::{parse_master_list, passive_authentication, validate_dg};
 
 fn main() -> Result<(), EmrtdError> {
     tracing_subscriber::fmt()
@@ -89,25 +89,30 @@ fn main() -> Result<(), EmrtdError> {
     let ef_sod = sm_object.read_data_from_ef(true)?;
     info!("Data from the EF.SOD: {}", bytes2hex(&ef_sod));
 
-    let master_list = include_bytes!("../data/DE_ML_2024-04-10-10-54-13.ml");
-
-    let csca_cert_store = parse_master_list(master_list)?;
-
-    info!("Number of certificates parse from the Master List in the store {}", csca_cert_store.all_certificates().len());
-
-    let result = passive_authentication(&ef_sod, &csca_cert_store).unwrap();
-    info!("{:?} {:?} {:?}", result.0.type_(), result.1, result.2);
+    #[cfg(feature = "passive_auth")]
+    {
+        let master_list: &[u8; 0] = include_bytes!("../data/DE_ML_2024-04-10-10-54-13.ml");
+        let csca_cert_store = parse_master_list(master_list)?;
+        info!(
+            "Number of certificates parse from the Master List in the store {}",
+            csca_cert_store.all_certificates().len()
+        );
+        let result = passive_authentication(&ef_sod, &csca_cert_store).unwrap();
+        info!("{:?} {:?} {:?}", result.0.type_(), result.1, result.2);
+    }
 
     // Read EF.DG1
     sm_object.select_ef(b"\x01\x01", "EF.DG1", true)?;
     let ef_dg1 = sm_object.read_data_from_ef(true)?;
     info!("Data from the EF.DG1: {}", bytes2hex(&ef_dg1));
+    #[cfg(feature = "passive_auth")]
     validate_dg(&ef_dg1, 1, result.0, &result.1)?;
 
     // Read EF.DG2
     sm_object.select_ef(b"\x01\x02", "EF.DG2", true)?;
     let ef_dg2 = sm_object.read_data_from_ef(true)?;
     info!("Data from the EF.DG2: {}", bytes2hex(&ef_dg2));
+    #[cfg(feature = "passive_auth")]
     validate_dg(&ef_dg2, 2, result.0, &result.1)?;
 
     let jpeg = get_jpeg_from_ef_dg2(&ef_dg2)?;

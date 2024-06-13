@@ -1,25 +1,28 @@
 //! A library that can read an eMRTD.
 //!
 //! A library that can read an eMRTD (Electronic Machine Readable Travel Document).
-//! 
+//!
 //! The `emrtd` crate provides a simple API that can be used to communicate with
-//! eMRTDs and read the data that resides within them. With the help of openssl,
+//! eMRTDs and read the data that resides within them. With the help of `openssl`,
 //! it can perform Passive Authentication.
-//! 
+//!
 //! **NOTE:**
 //! Please note that this crate is provided 'as is' and is not considered production-ready. Use at your own risk.
-//! 
+//!
 //! Currently Active Authentication (AA), Chip Authentication (CA), PACE or EAC
 //! are **not** supported.
+//!
+//! Enable the `passive_auth` feature for Passive Authentication (PA), but note
+//! that it depends on [`openssl`](https://docs.rs/openssl/latest/openssl/) crate.
 //!
 //! # Quick Start
 //!
 //! ```
-//! use emrtd::{
-//!     bytes2hex, get_jpeg_from_ef_dg2, other_mrz, parse_master_list,
-//!     passive_authentication, validate_dg, EmrtdComms, EmrtdError,
-//! };
+//! use emrtd::{bytes2hex, get_jpeg_from_ef_dg2, other_mrz, EmrtdComms, EmrtdError};
 //! use tracing::{error, info};
+//!
+//! #[cfg(feature = "passive_auth")]
+//! use emrtd::{parse_master_list, passive_authentication, validate_dg};
 //!
 //! fn main() -> Result<(), EmrtdError> {
 //!     tracing_subscriber::fmt()
@@ -89,7 +92,13 @@
 //!     // Select eMRTD application
 //!     sm_object.select_emrtd_application()?;
 //!
-//!     let secret = other_mrz(&doc_no, &birthdate, &expirydate)?;
+//!     let secret = match other_mrz(&doc_no, &birthdate, &expirydate) {
+//!         Ok(secret) => secret,
+//!         Err(EmrtdError) => {
+//!             error!("Invalid MRZ string.");
+//!             return Ok(());
+//!         }
+//!     };
 //!
 //!     sm_object.establish_bac_session_keys(secret.as_bytes())?;
 //!
@@ -103,23 +112,26 @@
 //!     let ef_sod = sm_object.read_data_from_ef(true)?;
 //!     info!("Data from the EF.SOD: {}", bytes2hex(&ef_sod));
 //!
-//!     let master_list = include_bytes!("../data/DE_ML_2024-04-10-10-54-13.ml");
-//!
-//!     let csca_cert_store = parse_master_list(master_list)?;
-//!
-//!     let result = passive_authentication(&ef_sod, &csca_cert_store).unwrap();
-//!     info!("{:?} {:?} {:?}", result.0.type_(), result.1, result.2);
+//!     #[cfg(feature = "passive_auth")]
+//!     {
+//!         let master_list = include_bytes!("../data/DE_ML_2024-04-10-10-54-13.ml");
+//!         let csca_cert_store = parse_master_list(master_list)?;
+//!         let result = passive_authentication(&ef_sod, &csca_cert_store).unwrap();
+//!         info!("{:?} {:?} {:?}", result.0.type_(), result.1, result.2);
+//!     }
 //!
 //!     // Read EF.DG1
 //!     sm_object.select_ef(b"\x01\x01", "EF.DG1", true)?;
 //!     let ef_dg1 = sm_object.read_data_from_ef(true)?;
 //!     info!("Data from the EF.DG1: {}", bytes2hex(&ef_dg1));
+//!     #[cfg(feature = "passive_auth")]
 //!     validate_dg(&ef_dg1, 1, result.0, &result.1)?;
 //!
 //!     // Read EF.DG2
 //!     sm_object.select_ef(b"\x01\x02", "EF.DG2", true)?;
 //!     let ef_dg2 = sm_object.read_data_from_ef(true)?;
 //!     info!("Data from the EF.DG2: {}", bytes2hex(&ef_dg2));
+//!     #[cfg(feature = "passive_auth")]
 //!     validate_dg(&ef_dg2, 2, result.0, &result.1)?;
 //!
 //!     let jpeg = get_jpeg_from_ef_dg2(&ef_dg2)?;
@@ -134,14 +146,14 @@
 extern crate alloc;
 use alloc::{borrow::ToOwned, collections::BTreeMap, format, string::String, vec, vec::Vec};
 use cipher::{BlockDecryptMut, BlockEncryptMut, KeyInit, KeyIvInit};
+use constant_time_eq::constant_time_eq;
 use core::{
     fmt::{self, Debug, Write},
     iter, mem,
 };
+#[cfg(feature = "passive_auth")]
 use openssl::{
     hash::{hash, MessageDigest},
-    memcmp::eq,
-    rand::rand_bytes,
     sign::Verifier,
     stack::Stack,
     x509::{
@@ -150,9 +162,17 @@ use openssl::{
     },
 };
 use pcsc::{Attribute::AtrString, Card};
+use rand::{rngs::OsRng, RngCore};
+#[cfg(feature = "passive_auth")]
 use rasn::{der, types::Oid};
+#[cfg(feature = "passive_auth")]
 use rasn_cms::{CertificateChoices, RevocationInfoChoice};
-use tracing::{error, info, trace, warn};
+use sha1_checked::Sha1;
+use sha2::{Digest, Sha256};
+use std::num::TryFromIntError;
+#[cfg(feature = "passive_auth")]
+use tracing::warn;
+use tracing::{error, info, trace};
 
 #[derive(Debug)]
 #[non_exhaustive]
@@ -172,12 +192,17 @@ pub enum EmrtdError {
     InvalidFileStructure(&'static str),
     VerifySignatureError(&'static str),
     VerifyHashError(String),
+    CalculateHashError(&'static str),
     PcscError(pcsc::Error),
-    BoringErrorStack(openssl::error::ErrorStack),
+    #[cfg(feature = "passive_auth")]
+    OpensslErrorStack(openssl::error::ErrorStack),
+    #[cfg(feature = "passive_auth")]
     RasnEncodeError(rasn::error::EncodeError),
+    #[cfg(feature = "passive_auth")]
     RasnDecodeError(rasn::error::DecodeError),
     PadError(cipher::inout::PadError),
     UnpadError(cipher::block_padding::UnpadError),
+    IntCastError(TryFromIntError),
 }
 impl fmt::Display for EmrtdError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -222,12 +247,19 @@ impl fmt::Display for EmrtdError {
             Self::VerifyHashError(ref error_msg) => {
                 write!(f, "Failure during comparison of hashes: {error_msg}")
             }
+            Self::CalculateHashError(error_msg) => {
+                write!(f, "Failure during calculation of hashes: {error_msg}")
+            }
             Self::PcscError(ref e) => fmt::Display::fmt(&e, f),
-            Self::BoringErrorStack(ref e) => fmt::Display::fmt(&e, f),
+            #[cfg(feature = "passive_auth")]
+            Self::OpensslErrorStack(ref e) => fmt::Display::fmt(&e, f),
+            #[cfg(feature = "passive_auth")]
             Self::RasnEncodeError(ref e) => fmt::Display::fmt(&e, f),
+            #[cfg(feature = "passive_auth")]
             Self::RasnDecodeError(ref e) => fmt::Display::fmt(&e, f),
             Self::PadError(ref e) => fmt::Display::fmt(&e, f),
             Self::UnpadError(ref e) => fmt::Display::fmt(&e, f),
+            Self::IntCastError(ref e) => fmt::Display::fmt(&e, f),
         }
     }
 }
@@ -315,6 +347,7 @@ pub enum MacAlgorithm {
 ///
 /// END
 ///
+#[cfg(feature = "passive_auth")]
 pub mod lds_security_object {
     extern crate alloc;
     use rasn::prelude::*;
@@ -368,6 +401,7 @@ pub mod lds_security_object {
 /// id-icao-cscaMasterListSigningKey OBJECT IDENTIFIER ::= {id-icao-mrtd-security 3}
 /// END
 ///
+#[cfg(feature = "passive_auth")]
 pub mod csca_master_list {
     extern crate alloc;
     use rasn::prelude::*;
@@ -686,8 +720,14 @@ pub fn int2asn1len(length: usize) -> Vec<u8> {
 ///
 /// `EmrtdError` if 'SHA1' fails.
 fn generate_key_seed(secret: &[u8]) -> Result<Vec<u8>, EmrtdError> {
-    let hash_bytes = hash(MessageDigest::sha1(), secret).map_err(EmrtdError::BoringErrorStack)?;
-    Ok(hash_bytes.to_vec())
+    let hash_result = Sha1::try_digest(secret);
+    if hash_result.has_collision() {
+        error!("SHA1 hash calculation during generate_key_seed had collision");
+        return Err(EmrtdError::CalculateHashError(
+            "SHA1 hash calculation during generate_key_seed had collision",
+        ));
+    }
+    Ok(hash_result.hash().as_slice().to_vec())
 }
 
 /// Encrypts data using the specified block cipher and mode.
@@ -922,8 +962,14 @@ fn compute_key(
 
     match alg {
         EncryptionAlgorithm::DES3 => {
-            let hash_bytes =
-                hash(MessageDigest::sha1(), &d).map_err(EmrtdError::BoringErrorStack)?;
+            let hash_result = Sha1::try_digest(&d);
+            if hash_result.has_collision() {
+                error!("SHA1 hash calculation during 3DES compute_key had collision");
+                return Err(EmrtdError::CalculateHashError(
+                    "SHA1 hash calculation during 3DES compute_key had collision",
+                ));
+            }
+            let hash_bytes = hash_result.hash().as_slice().to_vec();
             let key_1_2 = des3_adjust_parity_bits(hash_bytes.iter().copied().take(16).collect());
             match *key_type {
                 KeyType::Encryption => Ok([&key_1_2[..], &key_1_2[..8]].concat()),
@@ -931,19 +977,25 @@ fn compute_key(
             }
         }
         EncryptionAlgorithm::AES128 => {
-            let hash_bytes =
-                hash(MessageDigest::sha1(), &d).map_err(EmrtdError::BoringErrorStack)?;
+            let hash_result = Sha1::try_digest(&d);
+            if hash_result.has_collision() {
+                error!("SHA1 hash calculation during AES-128 compute_key had collision");
+                return Err(EmrtdError::CalculateHashError(
+                    "SHA1 hash calculation during AES-128 compute_key had collision",
+                ));
+            }
+            let hash_bytes = hash_result.hash().as_slice().to_vec();
             Ok(hash_bytes.iter().copied().take(16).collect())
         }
         EncryptionAlgorithm::AES192 => {
-            let hash_bytes =
-                hash(MessageDigest::sha256(), &d).map_err(EmrtdError::BoringErrorStack)?;
+            let hash_result = Sha256::digest(&d);
+            let hash_bytes = hash_result.as_slice().to_vec();
             Ok(hash_bytes.iter().copied().take(24).collect())
         }
         EncryptionAlgorithm::AES256 => {
-            let hash_bytes =
-                hash(MessageDigest::sha256(), &d).map_err(EmrtdError::BoringErrorStack)?;
-            Ok(hash_bytes.to_vec())
+            let hash_result = Sha256::digest(&d);
+            let hash_bytes = hash_result.as_slice().to_vec();
+            Ok(hash_bytes)
         }
     }
 }
@@ -1121,6 +1173,7 @@ fn des3_adjust_parity_bits(mut key: Vec<u8>) -> Vec<u8> {
 /// # Errors
 ///
 /// * `EmrtdError` if an unsupported OID is given.
+#[cfg(feature = "passive_auth")]
 fn oid2digestalg(oid: &rasn::types::ObjectIdentifier) -> Result<MessageDigest, EmrtdError> {
     let digest_alg_oid_dict: [(&Oid, MessageDigest); 6] = [
         (
@@ -1169,24 +1222,28 @@ fn oid2digestalg(oid: &rasn::types::ObjectIdentifier) -> Result<MessageDigest, E
 ///
 /// * `EmrtdError` if the data is incomplete or the tags don't match.
 fn validate_asn1_tag(data: &[u8], tag: &[u8]) -> Result<(), EmrtdError> {
-    match data.get(..tag.len()) {
-        Some(d) => {
-            if !d.starts_with(tag) {
+    data.get(..tag.len()).map_or_else(
+        || {
+            error!(
+            "Error while validating ASN1 tag, `data.len()`: `{}` is less than `tag.len()`: `{}`",
+            data.len(),
+            tag.len()
+        );
+            Err(EmrtdError::ParseAsn1DataError(tag.len(), data.len()))
+        },
+        |d| {
+            if d.starts_with(tag) {
+                Ok(())
+            } else {
                 error!(
                     "Error while validating ASN1 tag, expected: {}, found {}",
                     bytes2hex(tag),
                     bytes2hex(d)
                 );
                 Err(EmrtdError::ParseAsn1TagError(bytes2hex(tag), bytes2hex(d)))
-            } else {
-                Ok(())
             }
-        }
-        None => {
-            error!("Error while validating ASN1 tag, `data.len()`: `{}` is less than `tag.len()`: `{}`", data.len(), tag.len());
-            Err(EmrtdError::ParseAsn1DataError(tag.len(), data.len()))
-        }
-    }
+        },
+    )
 }
 
 /// Retrieve the ASN.1 child from the provided data.
@@ -1265,6 +1322,7 @@ fn get_asn1_child(data: &[u8], tag_len: usize) -> Result<(&[u8], &[u8]), EmrtdEr
 /// #     Ok(())
 /// # }
 /// ```
+#[cfg(feature = "passive_auth")]
 pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
     // We expect a Master List as specified in
     // ICAO Doc 9303-12 Section 9
@@ -1393,7 +1451,7 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
                                 // extension for Master List Signer certificates is 2.23.136.1.1.3.
                                 if ext.extn_id.eq(Oid::const_new(&[2, 5, 29, 37]))
                                     && ext.extn_value.len() == 10
-                                    && eq(
+                                    && constant_time_eq(
                                         &ext.extn_value,
                                         b"\x30\x08\x06\x06\x67\x81\x08\x01\x01\x03",
                                     )
@@ -1402,7 +1460,7 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
                                         der::encode(&c).map_err(EmrtdError::RasnEncodeError)?;
                                     let master_list_signer =
                                         X509::from_der(&master_list_signer_bytes)
-                                            .map_err(EmrtdError::BoringErrorStack)?;
+                                            .map_err(EmrtdError::OpensslErrorStack)?;
                                     possible_master_list_signer = Some(master_list_signer);
                                     break;
                                 // It is mandatory by ICAO Doc 9303-12 Table 6
@@ -1412,12 +1470,15 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
                                 // > PathLenConstraint must always be '0'
                                 } else if ext.extn_id.eq(Oid::const_new(&[2, 5, 29, 19]))
                                     && ext.extn_value.len() == 8
-                                    && eq(&ext.extn_value, b"\x30\x06\x01\x01\xFF\x02\x01\x00")
+                                    && constant_time_eq(
+                                        &ext.extn_value,
+                                        b"\x30\x06\x01\x01\xFF\x02\x01\x00",
+                                    )
                                 {
                                     let csca_cert_bytes =
                                         der::encode(&c).map_err(EmrtdError::RasnEncodeError)?;
                                     let csca_cert = X509::from_der(&csca_cert_bytes)
-                                        .map_err(EmrtdError::BoringErrorStack)?;
+                                        .map_err(EmrtdError::OpensslErrorStack)?;
                                     possible_csca_cert = Some(csca_cert);
                                     break;
                                 }
@@ -1439,16 +1500,16 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
                 // And verify that the Master List Signer was issued by CSCA certificate if it exists
                 match possible_csca_cert {
                     Some(csca_cert) => {
-                        let chain = Stack::new().map_err(EmrtdError::BoringErrorStack)?;
+                        let chain = Stack::new().map_err(EmrtdError::OpensslErrorStack)?;
                         let mut store_bldr =
-                            X509StoreBuilder::new().map_err(EmrtdError::BoringErrorStack)?;
+                            X509StoreBuilder::new().map_err(EmrtdError::OpensslErrorStack)?;
                         store_bldr
                             .add_cert(csca_cert)
-                            .map_err(EmrtdError::BoringErrorStack)?;
+                            .map_err(EmrtdError::OpensslErrorStack)?;
                         let store = store_bldr.build();
 
                         let mut context =
-                            X509StoreContext::new().map_err(EmrtdError::BoringErrorStack)?;
+                            X509StoreContext::new().map_err(EmrtdError::OpensslErrorStack)?;
                         let master_list_verification = context
                             .init(&store, &c, &chain, |c| {
                                 let verification = c.verify_cert()?;
@@ -1458,7 +1519,7 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
                                     Ok((verification, c.error().error_string()))
                                 }
                             })
-                            .map_err(EmrtdError::BoringErrorStack)?;
+                            .map_err(EmrtdError::OpensslErrorStack)?;
                         if !master_list_verification.0 {
                             warn!("Error while verifying Master List Signer Certificate signature: {}", master_list_verification.1);
                         }
@@ -1685,7 +1746,7 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
     //
     // Message Digest Calculation Process as specified in RFC 5652
     let csca_master_list_hash =
-        hash(digest_algorithm, &csca_master_list_bytes).map_err(EmrtdError::BoringErrorStack)?;
+        hash(digest_algorithm, &csca_master_list_bytes).map_err(EmrtdError::OpensslErrorStack)?;
 
     if csca_master_list_hash.ne(&message_digest) {
         error!("Digest of cscaMasterList does not match with the digest in SignedAttributes");
@@ -1718,15 +1779,15 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
     info!("{:?}", master_list_signer);
     let pub_key = master_list_signer
         .public_key()
-        .map_err(EmrtdError::BoringErrorStack)?;
+        .map_err(EmrtdError::OpensslErrorStack)?;
     let mut verifier =
-        Verifier::new(digest_algorithm, &pub_key).map_err(EmrtdError::BoringErrorStack)?;
+        Verifier::new(digest_algorithm, &pub_key).map_err(EmrtdError::OpensslErrorStack)?;
     verifier
         .update(&signed_attrs_bytes)
-        .map_err(EmrtdError::BoringErrorStack)?;
+        .map_err(EmrtdError::OpensslErrorStack)?;
     let sig_verified = verifier
         .verify(signature)
-        .map_err(EmrtdError::BoringErrorStack)?;
+        .map_err(EmrtdError::OpensslErrorStack)?;
     info!("Signature verification: {sig_verified}");
 
     if !sig_verified {
@@ -1748,15 +1809,15 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
     }
 
     // Create a store that can be used to verify DSC certificate during passive authentication
-    let mut store_bldr = X509StoreBuilder::new().map_err(EmrtdError::BoringErrorStack)?;
+    let mut store_bldr = X509StoreBuilder::new().map_err(EmrtdError::OpensslErrorStack)?;
 
     for csca_cert in csca_master_list.cert_list {
         match der::encode(&csca_cert).map_err(EmrtdError::RasnEncodeError) {
             Ok(c) => {
-                let x509cert = X509::from_der(&c).map_err(EmrtdError::BoringErrorStack)?;
+                let x509cert = X509::from_der(&c).map_err(EmrtdError::OpensslErrorStack)?;
                 store_bldr
                     .add_cert(x509cert)
-                    .map_err(EmrtdError::BoringErrorStack)?;
+                    .map_err(EmrtdError::OpensslErrorStack)?;
             }
             Err(e) => return Err(e),
         }
@@ -1825,6 +1886,7 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
 ///
 /// * Instead of returning error immediately after an error, collect all errors and return at the end
 /// of the function, i.e. in case of signature verification failure, maybe the user can still get the DG hashes
+#[cfg(feature = "passive_auth")]
 pub fn passive_authentication(
     ef_sod: &[u8],
     cert_store: &X509Store,
@@ -1947,7 +2009,7 @@ pub fn passive_authentication(
         for cert in signed_data.certificates.iter().flatten() {
             if let CertificateChoices::Certificate(c) = cert {
                 let dsc_bytes = der::encode(&c).map_err(EmrtdError::RasnEncodeError)?;
-                let dsc = X509::from_der(&dsc_bytes).map_err(EmrtdError::BoringErrorStack)?;
+                let dsc = X509::from_der(&dsc_bytes).map_err(EmrtdError::OpensslErrorStack)?;
                 possible_dsc = Some(dsc);
                 break;
             }
@@ -1955,8 +2017,8 @@ pub fn passive_authentication(
         // Make sure we got a possible certificate
         match possible_dsc {
             Some(c) => {
-                let chain = Stack::new().map_err(EmrtdError::BoringErrorStack)?;
-                let mut context = X509StoreContext::new().map_err(EmrtdError::BoringErrorStack)?;
+                let chain = Stack::new().map_err(EmrtdError::OpensslErrorStack)?;
+                let mut context = X509StoreContext::new().map_err(EmrtdError::OpensslErrorStack)?;
                 let dsc_verification = context.init(cert_store, &c, &chain, |c| {
                     let verification = c.verify_cert()?;
                     if verification {
@@ -1964,7 +2026,7 @@ pub fn passive_authentication(
                     } else {
                         Ok((verification, c.error().error_string()))
                     }
-                }).map_err(EmrtdError::BoringErrorStack)?;
+                }).map_err(EmrtdError::OpensslErrorStack)?;
                 if !dsc_verification.0 {
                     error!("Error while verifying Document Signer Certificate signature: {}", dsc_verification.1);
                     return Err(EmrtdError::InvalidFileStructure("DSC certificate verification using CSCA store failed"));
@@ -2194,8 +2256,8 @@ pub fn passive_authentication(
     // <https://datatracker.ietf.org/doc/html/rfc3369#section-5.4>
     //
     // Message Digest Calculation Process as specified in RFC 3369
-    let lds_security_object_hash =
-        hash(digest_algorithm, &lds_security_object_bytes).map_err(EmrtdError::BoringErrorStack)?;
+    let lds_security_object_hash = hash(digest_algorithm, &lds_security_object_bytes)
+        .map_err(EmrtdError::OpensslErrorStack)?;
 
     if lds_security_object_hash.ne(&message_digest) {
         error!("Digest of LDSSecurityObject does not match with the digest in SignedAttributes");
@@ -2225,15 +2287,15 @@ pub fn passive_authentication(
     // <https://datatracker.ietf.org/doc/html/rfc3369#section-5.6>
     let _signature_algorithm = &signer_info.signature_algorithm;
     let signature = &signer_info.signature;
-    let pub_key = dsc.public_key().map_err(EmrtdError::BoringErrorStack)?;
+    let pub_key = dsc.public_key().map_err(EmrtdError::OpensslErrorStack)?;
     let mut verifier =
-        Verifier::new(digest_algorithm, &pub_key).map_err(EmrtdError::BoringErrorStack)?;
+        Verifier::new(digest_algorithm, &pub_key).map_err(EmrtdError::OpensslErrorStack)?;
     verifier
         .update(&signed_attrs_bytes)
-        .map_err(EmrtdError::BoringErrorStack)?;
+        .map_err(EmrtdError::OpensslErrorStack)?;
     let sig_verified = verifier
         .verify(signature)
-        .map_err(EmrtdError::BoringErrorStack)?;
+        .map_err(EmrtdError::OpensslErrorStack)?;
     info!("Signature verification: {sig_verified}");
 
     if !sig_verified {
@@ -2459,6 +2521,7 @@ pub fn get_jpeg_from_ef_dg2(ef_dg2: &[u8]) -> Result<&[u8], EmrtdError> {
 /// #     Ok(())
 /// # }
 /// ```
+#[cfg(feature = "passive_auth")]
 pub fn validate_dg(
     dg: &[u8],
     dg_number: i32,
@@ -2470,7 +2533,7 @@ pub fn validate_dg(
         return Err(EmrtdError::InvalidArgument("Invalid Data Group number"));
     }
 
-    let hash_bytes = hash(message_digest, dg).map_err(EmrtdError::BoringErrorStack)?;
+    let hash_bytes = hash(message_digest, dg).map_err(EmrtdError::OpensslErrorStack)?;
     let mut verified_hash = None;
     for dg_hash in verified_hashes {
         if dg_hash
@@ -2828,7 +2891,7 @@ impl EmrtdComms {
 
         let protected_apdu = [
             apdu.get_command_header(),
-            [payload.len() as u8].to_vec(),
+            [u8::try_from(payload.len()).map_err(EmrtdError::IntCastError)?].to_vec(),
             payload,
             b"\x00".to_vec(),
         ]
@@ -2969,7 +3032,7 @@ impl EmrtdComms {
             pad_len,
         )?;
         let cc = compute_mac(ks_mac, &k, mac_alg)?;
-        if !eq(&cc, do8e.unwrap_or_default()) {
+        if !constant_time_eq(&cc, do8e.unwrap_or_default()) {
             error!("MAC verification failed");
             return Err(EmrtdError::VerifyMacError());
         }
@@ -3154,13 +3217,16 @@ impl EmrtdComms {
         trace!("Reading {data_len} bytes from EF...");
         while offset < data_len {
             let le = if data_len - offset < 0xFA {
-                [((data_len - offset) & 0xFF) as u8]
+                [u8::try_from((data_len - offset) & 0xFF).map_err(EmrtdError::IntCastError)?]
             } else {
                 [0x00]
             };
 
             // Send "Read Binary" APDU for the next chunk
-            let offset_bytes = [(offset >> 8) as u8, (offset & 0xFF) as u8];
+            let offset_bytes = [
+                u8::try_from(offset >> 8).map_err(EmrtdError::IntCastError)?,
+                u8::try_from(offset & 0xFF).map_err(EmrtdError::IntCastError)?,
+            ];
             let read_apdu = APDU::new(
                 b'\x00',
                 b'\xB0',
@@ -3259,9 +3325,9 @@ impl EmrtdComms {
         };
 
         let mut rnd_ifd: [u8; 8] = [0; 8];
-        rand_bytes(&mut rnd_ifd).map_err(EmrtdError::BoringErrorStack)?;
+        OsRng.fill_bytes(&mut rnd_ifd);
         let mut k_ifd: [u8; 16] = [0; 16];
-        rand_bytes(&mut k_ifd).map_err(EmrtdError::BoringErrorStack)?;
+        OsRng.fill_bytes(&mut k_ifd);
 
         let e_ifd = encrypt::<cbc::Encryptor<des::TdesEde3>>(
             ba_key_enc,
@@ -3304,7 +3370,7 @@ impl EmrtdComms {
             &padding_method_2(&resp_data_enc[..resp_data_enc.len() - 8], 8)?,
             &MacAlgorithm::DES,
         )?;
-        if !eq(&m_ic, &resp_data_enc[resp_data_enc.len() - 8..]) {
+        if !constant_time_eq(&m_ic, &resp_data_enc[resp_data_enc.len() - 8..]) {
             error!("MAC verification failed");
             return Err(EmrtdError::VerifyMacError());
         }
@@ -3315,12 +3381,12 @@ impl EmrtdComms {
             &resp_data_enc[..resp_data_enc.len() - 8],
         )?;
 
-        if !eq(&resp_data[..8], &rnd_ic[..]) {
+        if !constant_time_eq(&resp_data[..8], &rnd_ic[..]) {
             error!("Error while establishing BAC session keys.");
             return Err(EmrtdError::InvalidResponseError());
         }
 
-        if !eq(&resp_data[8..16], &rnd_ifd[..]) {
+        if !constant_time_eq(&resp_data[8..16], &rnd_ifd[..]) {
             error!("Error while establishing BAC session keys.");
             return Err(EmrtdError::InvalidResponseError());
         }
@@ -3727,6 +3793,7 @@ fn test_compute_mac() -> Result<(), EmrtdError> {
     Ok(())
 }
 
+#[cfg(feature = "passive_auth")]
 #[test]
 fn test_oid2digestalg_known_oid() -> Result<(), EmrtdError> {
     let result = oid2digestalg(
@@ -3737,6 +3804,7 @@ fn test_oid2digestalg_known_oid() -> Result<(), EmrtdError> {
     Ok(())
 }
 
+#[cfg(feature = "passive_auth")]
 #[test]
 fn test_oid2digestalg_unknown_oid() -> Result<(), EmrtdError> {
     // ripemd256

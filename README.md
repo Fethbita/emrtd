@@ -5,7 +5,7 @@
 A library that can read an eMRTD (Electronic Machine Readable Travel Document).
 
 The `emrtd` crate provides a simple API that can be used to communicate with
-eMRTDs and read the data that resides within them. With the help of openssl,
+eMRTDs and read the data that resides within them. With the help of `openssl`,
 it can perform Passive Authentication.
 
 **NOTE:**
@@ -13,6 +13,8 @@ Please note that this crate is provided 'as is' and is not considered production
 
 **WARNING:**
 Currently Active Authentication (AA), Chip Authentication (CA), PACE or EAC are **not** supported.
+
+Enable the `passive_auth` feature for Passive Authentication (PA), but note that it depends on [`openssl`](https://docs.rs/openssl/latest/openssl/) crate.
 
 ## License
 
