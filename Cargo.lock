@@ -265,8 +265,10 @@ dependencies = [
  "cipher",
  "constant_time_eq",
  "des",
+ "digest",
  "ecb",
  "hex-literal",
+ "md-5",
  "openssl",
  "pcsc",
  "rand",
@@ -401,6 +403,16 @@ name = "log"
 version = "0.4.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "90ed8c1e510134f979dbc4f070f87d4313098b704861a105fe34231c70a3901c"
+
+[[package]]
+name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest",
+]
 
 [[package]]
 name = "memchr"

@@ -152,8 +152,10 @@ use core::{
     iter, mem,
 };
 #[cfg(feature = "passive_auth")]
+use digest::DynDigest;
+#[cfg(feature = "passive_auth")]
 use openssl::{
-    hash::{hash, MessageDigest},
+    hash::{MessageDigest},
     sign::Verifier,
     stack::Stack,
     x509::{
@@ -167,9 +169,10 @@ use rand::{rngs::OsRng, RngCore};
 use rasn::{der, types::Oid};
 #[cfg(feature = "passive_auth")]
 use rasn_cms::{CertificateChoices, RevocationInfoChoice};
+#[cfg(feature = "passive_auth")]
 use sha1_checked::Sha1;
+#[cfg(feature = "passive_auth")]
 use sha2::{Digest, Sha256};
-use std::num::TryFromIntError;
 #[cfg(feature = "passive_auth")]
 use tracing::warn;
 use tracing::{error, info, trace};
@@ -202,7 +205,7 @@ pub enum EmrtdError {
     RasnDecodeError(rasn::error::DecodeError),
     PadError(cipher::inout::PadError),
     UnpadError(cipher::block_padding::UnpadError),
-    IntCastError(TryFromIntError),
+    IntCastError(std::num::TryFromIntError),
 }
 impl fmt::Display for EmrtdError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -1168,43 +1171,55 @@ fn des3_adjust_parity_bits(mut key: Vec<u8>) -> Vec<u8> {
 ///
 /// # Returns
 ///
-/// The name of the digest algorithm if the OID is recognized, else an `EmrtdError`.
+/// The digest algorithm if the OID is recognized, else an `EmrtdError`.
 ///
 /// # Errors
 ///
 /// * `EmrtdError` if an unsupported OID is given.
 #[cfg(feature = "passive_auth")]
-fn oid2digestalg(oid: &rasn::types::ObjectIdentifier) -> Result<MessageDigest, EmrtdError> {
-    let digest_alg_oid_dict: [(&Oid, MessageDigest); 6] = [
-        (
-            Oid::const_new(&[2, 16, 840, 1, 101, 3, 4, 2, 4]),
-            MessageDigest::sha224(),
-        ),
-        (
-            Oid::const_new(&[2, 16, 840, 1, 101, 3, 4, 2, 3]),
-            MessageDigest::sha512(),
-        ),
-        (
-            Oid::const_new(&[2, 16, 840, 1, 101, 3, 4, 2, 2]),
-            MessageDigest::sha384(),
-        ),
-        (
-            Oid::const_new(&[2, 16, 840, 1, 101, 3, 4, 2, 1]),
-            MessageDigest::sha256(),
-        ),
-        (Oid::const_new(&[1, 3, 14, 3, 2, 26]), MessageDigest::sha1()),
-        (
-            Oid::const_new(&[1, 2, 840, 113549, 2, 5]),
-            MessageDigest::md5(),
-        ),
-    ];
-    for (digest_oid, digest) in digest_alg_oid_dict {
-        if oid.eq(digest_oid) {
-            return Ok(digest);
-        }
+fn oid2digestalg(oid: &rasn::types::ObjectIdentifier) -> Result<Box<dyn DynDigest>, EmrtdError> {
+    if Oid::const_new(&[2, 16, 840, 1, 101, 3, 4, 2, 4]).eq(oid) {
+        Ok(Box::new(sha2::Sha224::default()))
+    } else if Oid::const_new(&[2, 16, 840, 1, 101, 3, 4, 2, 3]).eq(oid) {
+        Ok(Box::new(sha2::Sha512::default()))
+    } else if Oid::const_new(&[2, 16, 840, 1, 101, 3, 4, 2, 2]).eq(oid) {
+        Ok(Box::new(sha2::Sha384::default()))
+    } else if Oid::const_new(&[2, 16, 840, 1, 101, 3, 4, 2, 1]).eq(oid) {
+        Ok(Box::new(sha2::Sha256::default()))
+    } else if Oid::const_new(&[1, 3, 14, 3, 2, 26]).eq(oid) {
+        Ok(Box::new(sha1_checked::Sha1::default()))
+    } else if Oid::const_new(&[1, 2, 840, 113549, 2, 5]).eq(oid) {
+        Ok(Box::new(md5::Md5::default()))
+    } else {
+        error!("Invalid OID while finding a digest algorithm");
+        Err(EmrtdError::InvalidOidError())
     }
-    error!("Invalid OID while finding a digest algorithm");
-    Err(EmrtdError::InvalidOidError())
+}
+
+/// Hashes the given data using the provided digest algorithm.
+///
+/// # Arguments
+///
+/// * `hasher` - Hash algorithm to use
+/// * `data` - Data to be hashed.
+///
+/// # Returns
+///
+/// A `Vec<u8>` containing the resulting hash value.
+///
+/// # Example
+///
+/// ```
+/// let mut hasher = sha2::Sha256::default();
+/// let data = b"some data";
+/// let result = use_digestalg(&mut hasher, data);
+/// println!("{:?}", result);
+/// ```
+#[cfg(feature = "passive_auth")]
+pub fn use_digestalg(hasher: &mut dyn DynDigest, data: &[u8]) -> Vec<u8> {
+    hasher.update(data);
+    let hash_value: &[u8] = &*(hasher.finalize_reset());
+    return hash_value.to_vec();
 }
 
 /// Validate the ASN.1 tag of the provided data. Multi-byte tags are supported.
@@ -1617,7 +1632,7 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
         ));
     }
     // Ignore digest_algorithm parameters
-    let digest_algorithm = oid2digestalg(&signer_info.digest_algorithm.algorithm)?;
+    let mut digest_algorithm = oid2digestalg(&signer_info.digest_algorithm.algorithm)?;
 
     // RFC 5652 Section 5.3
     // <https://datatracker.ietf.org/doc/html/rfc5652#section-5.3>
@@ -1745,8 +1760,7 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
     // <https://datatracker.ietf.org/doc/html/rfc5652#section-5.4>
     //
     // Message Digest Calculation Process as specified in RFC 5652
-    let csca_master_list_hash =
-        hash(digest_algorithm, &csca_master_list_bytes).map_err(EmrtdError::OpensslErrorStack)?;
+    let csca_master_list_hash = use_digestalg(&mut *digest_algorithm, &csca_master_list_bytes);
 
     if csca_master_list_hash.ne(&message_digest) {
         error!("Digest of cscaMasterList does not match with the digest in SignedAttributes");
@@ -1890,7 +1904,7 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
 pub fn passive_authentication(
     ef_sod: &[u8],
     cert_store: &X509Store,
-) -> Result<(MessageDigest, Vec<lds_security_object::DataGroupHash>, X509), EmrtdError> {
+) -> Result<(Box<dyn DynDigest>, Vec<lds_security_object::DataGroupHash>, X509), EmrtdError> {
     // ICAO Doc 9303-10 Section 4.6.2
     // <https://www.icao.int/publications/Documents/9303_p10_cons_en.pdf>
     // Strip Document Security Object Tag 0x77
@@ -2256,8 +2270,7 @@ pub fn passive_authentication(
     // <https://datatracker.ietf.org/doc/html/rfc3369#section-5.4>
     //
     // Message Digest Calculation Process as specified in RFC 3369
-    let lds_security_object_hash = hash(digest_algorithm, &lds_security_object_bytes)
-        .map_err(EmrtdError::OpensslErrorStack)?;
+    let lds_security_object_hash = use_digestalg(&mut *digest_algorithm, &lds_security_object_bytes);
 
     if lds_security_object_hash.ne(&message_digest) {
         error!("Digest of LDSSecurityObject does not match with the digest in SignedAttributes");
@@ -2525,7 +2538,7 @@ pub fn get_jpeg_from_ef_dg2(ef_dg2: &[u8]) -> Result<&[u8], EmrtdError> {
 pub fn validate_dg(
     dg: &[u8],
     dg_number: i32,
-    message_digest: MessageDigest,
+    mut message_digest: Box<dyn DynDigest>,
     verified_hashes: &[lds_security_object::DataGroupHash],
 ) -> Result<(), EmrtdError> {
     if !(1..=16).contains(&dg_number) {
@@ -2533,7 +2546,7 @@ pub fn validate_dg(
         return Err(EmrtdError::InvalidArgument("Invalid Data Group number"));
     }
 
-    let hash_bytes = hash(message_digest, dg).map_err(EmrtdError::OpensslErrorStack)?;
+    let hash_bytes = use_digestalg(&mut *message_digest, dg);
     let mut verified_hash = None;
     for dg_hash in verified_hashes {
         if dg_hash
@@ -2545,7 +2558,7 @@ pub fn validate_dg(
     }
     match verified_hash {
         Some(verified_hash) => {
-            if !eq(verified_hash, &hash_bytes) {
+            if !constant_time_eq(verified_hash, &hash_bytes) {
                 error!("Potentially cloned document, hashes do not match");
                 return Err(EmrtdError::VerifyHashError(
                     "Potentially cloned document, hashes do not match".to_owned(),
@@ -3796,10 +3809,13 @@ fn test_compute_mac() -> Result<(), EmrtdError> {
 #[cfg(feature = "passive_auth")]
 #[test]
 fn test_oid2digestalg_known_oid() -> Result<(), EmrtdError> {
-    let result = oid2digestalg(
+    use hex_literal::hex;
+    let mut result = oid2digestalg(
         &rasn::types::ObjectIdentifier::new(vec![2, 16, 840, 1, 101, 3, 4, 2, 1]).unwrap(),
     )?;
-    assert!(result.eq(&MessageDigest::sha256()));
+    // Get hash itself somehow and assert
+    let digest = use_digestalg(&mut *result, &hex!("DEADBEEF"));
+    assert_eq!(digest, &hex!("DEADBEEF"));
 
     Ok(())
 }
