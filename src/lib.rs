@@ -112,11 +112,12 @@
 //!     let ef_sod = sm_object.read_data_from_ef(true)?;
 //!     info!("Data from the EF.SOD: {}", bytes2hex(&ef_sod));
 //!
+//!     let result;
 //!     #[cfg(feature = "passive_auth")]
 //!     {
 //!         let master_list = include_bytes!("../data/DE_ML_2024-04-10-10-54-13.ml");
 //!         let csca_cert_store = parse_master_list(master_list)?;
-//!         let result = passive_authentication(&ef_sod, &csca_cert_store).unwrap();
+//!         result = passive_authentication(&ef_sod, &csca_cert_store).unwrap();
 //!         info!("{:?} {:?} {:?}", result.0.type_(), result.1, result.2);
 //!     }
 //!
@@ -1865,7 +1866,7 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
 /// use openssl::x509::store::X509StoreBuilder;
 /// use tracing::{info, error};
 ///
-/// let store = X509StoreBuilder::new().map_err(EmrtdError::BoringErrorStack)?.build();
+/// let store = X509StoreBuilder::new().map_err(EmrtdError::OpensslErrorStack)?.build();
 ///
 /// let ef_sod_data = &[/* EF.SOD Data */];
 /// match passive_authentication(ef_sod_data, &store) {
@@ -2500,7 +2501,7 @@ pub fn get_jpeg_from_ef_dg2(ef_dg2: &[u8]) -> Result<&[u8], EmrtdError> {
 /// use openssl::x509::store::X509StoreBuilder;
 /// use tracing::{info, error};
 ///
-/// let store = X509StoreBuilder::new().map_err(EmrtdError::BoringErrorStack)?.build();
+/// let store = X509StoreBuilder::new().map_err(EmrtdError::OpensslErrorStack)?.build();
 ///
 /// let ef_sod_data = &[/* EF.SOD Data */];
 /// let ef_dg1 = &[/* EF.DG1 Data */];
@@ -2545,7 +2546,7 @@ pub fn validate_dg(
     }
     match verified_hash {
         Some(verified_hash) => {
-            if !eq(verified_hash, &hash_bytes) {
+            if !constant_time_eq(verified_hash, &hash_bytes) {
                 error!("Potentially cloned document, hashes do not match");
                 return Err(EmrtdError::VerifyHashError(
                     "Potentially cloned document, hashes do not match".to_owned(),
