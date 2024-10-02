@@ -155,7 +155,7 @@ use core::{
 use digest::DynDigest;
 #[cfg(feature = "passive_auth")]
 use openssl::{
-    hash::{MessageDigest},
+    hash::MessageDigest,
     sign::Verifier,
     stack::Stack,
     x509::{
@@ -1037,18 +1037,18 @@ fn compute_mac(key: &[u8], data: &[u8], alg: &MacAlgorithm) -> Result<Vec<u8>, E
             let key1 = &key[..8];
             let key2 = &key[8..];
 
-            let mut h = encrypt_ecb::<ecb::Encryptor<des::Des>>(key1, &data[..8])?;
+            let mut h = encrypt_ecb::<des::Des>(key1, &data[..8])?;
 
             for i in 1..(data.len() / 8) {
-                h = encrypt_ecb::<ecb::Encryptor<des::Des>>(
+                h = encrypt_ecb::<des::Des>(
                     key1,
                     &xor_slices(&h, &data[8 * i..8 * (i + 1)])?,
                 )?;
             }
 
-            let mac_x = encrypt_ecb::<ecb::Encryptor<des::Des>>(
+            let mac_x = encrypt_ecb::<des::Des>(
                 key1,
-                &decrypt_ecb::<ecb::Decryptor<des::Des>>(key2, &h)?,
+                &decrypt_ecb::<des::Des>(key2, &h)?,
             )?;
 
             Ok(mac_x)
@@ -1207,13 +1207,20 @@ fn oid2digestalg(oid: &rasn::types::ObjectIdentifier) -> Result<Box<dyn DynDiges
 ///
 /// A `Vec<u8>` containing the resulting hash value.
 ///
-/// # Example
+/// # Examples
 ///
 /// ```
+/// # use emrtd::EmrtdError;
+/// #
+/// # fn main() -> Result<(), EmrtdError> {
+/// use emrtd::use_digestalg;
 /// let mut hasher = sha2::Sha256::default();
 /// let data = b"some data";
 /// let result = use_digestalg(&mut hasher, data);
 /// println!("{:?}", result);
+/// #
+/// #     Ok(())
+/// # }
 /// ```
 #[cfg(feature = "passive_auth")]
 pub fn use_digestalg(hasher: &mut dyn DynDigest, data: &[u8]) -> Vec<u8> {
@@ -1879,7 +1886,7 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
 /// use openssl::x509::store::X509StoreBuilder;
 /// use tracing::{info, error};
 ///
-/// let store = X509StoreBuilder::new().map_err(EmrtdError::BoringErrorStack)?.build();
+/// let store = X509StoreBuilder::new().map_err(EmrtdError::OpensslErrorStack)?.build();
 ///
 /// let ef_sod_data = &[/* EF.SOD Data */];
 /// match passive_authentication(ef_sod_data, &store) {
@@ -2148,7 +2155,7 @@ pub fn passive_authentication(
         ));
     }
     // Ignore digest_algorithm parameters
-    let digest_algorithm = oid2digestalg(&signer_info.digest_algorithm.algorithm)?;
+    let mut digest_algorithm = oid2digestalg(&signer_info.digest_algorithm.algorithm)?;
 
     // RFC 3369 Section 5.3
     // <https://datatracker.ietf.org/doc/html/rfc3369#section-5.3>
@@ -2513,7 +2520,7 @@ pub fn get_jpeg_from_ef_dg2(ef_dg2: &[u8]) -> Result<&[u8], EmrtdError> {
 /// use openssl::x509::store::X509StoreBuilder;
 /// use tracing::{info, error};
 ///
-/// let store = X509StoreBuilder::new().map_err(EmrtdError::BoringErrorStack)?.build();
+/// let store = X509StoreBuilder::new().map_err(EmrtdError::OpensslErrorStack)?.build();
 ///
 /// let ef_sod_data = &[/* EF.SOD Data */];
 /// let ef_dg1 = &[/* EF.DG1 Data */];
@@ -2852,15 +2859,15 @@ impl EmrtdComms {
                     encrypt::<cbc::Encryptor<des::TdesEde3>>(ks_enc, Some(&[0; 8]), data)?
                 }
                 EncryptionAlgorithm::AES128 => {
-                    let ssc_enc = encrypt_ecb::<ecb::Encryptor<aes::Aes128>>(ks_enc, ssc)?;
+                    let ssc_enc = encrypt_ecb::<aes::Aes128>(ks_enc, ssc)?;
                     encrypt::<cbc::Encryptor<aes::Aes128>>(ks_enc, Some(&ssc_enc), data)?
                 }
                 EncryptionAlgorithm::AES192 => {
-                    let ssc_enc = encrypt_ecb::<ecb::Encryptor<aes::Aes192>>(ks_enc, ssc)?;
+                    let ssc_enc = encrypt_ecb::<aes::Aes192>(ks_enc, ssc)?;
                     encrypt::<cbc::Encryptor<aes::Aes192>>(ks_enc, Some(&ssc_enc), data)?
                 }
                 EncryptionAlgorithm::AES256 => {
-                    let ssc_enc = encrypt_ecb::<ecb::Encryptor<aes::Aes256>>(ks_enc, ssc)?;
+                    let ssc_enc = encrypt_ecb::<aes::Aes256>(ks_enc, ssc)?;
                     encrypt::<cbc::Encryptor<aes::Aes256>>(ks_enc, Some(&ssc_enc), data)?
                 }
             };
@@ -3063,15 +3070,15 @@ impl EmrtdComms {
                     &encrypted_data,
                 )?,
                 EncryptionAlgorithm::AES128 => {
-                    let ssc_enc = encrypt_ecb::<ecb::Encryptor<aes::Aes128>>(ks_enc, ssc)?;
+                    let ssc_enc = encrypt_ecb::<aes::Aes128>(ks_enc, ssc)?;
                     decrypt::<cbc::Decryptor<aes::Aes128>>(ks_enc, Some(&ssc_enc), &encrypted_data)?
                 }
                 EncryptionAlgorithm::AES192 => {
-                    let ssc_enc = encrypt_ecb::<ecb::Encryptor<aes::Aes192>>(ks_enc, ssc)?;
+                    let ssc_enc = encrypt_ecb::<aes::Aes192>(ks_enc, ssc)?;
                     decrypt::<cbc::Decryptor<aes::Aes192>>(ks_enc, Some(&ssc_enc), &encrypted_data)?
                 }
                 EncryptionAlgorithm::AES256 => {
-                    let ssc_enc = encrypt_ecb::<ecb::Encryptor<aes::Aes256>>(ks_enc, ssc)?;
+                    let ssc_enc = encrypt_ecb::<aes::Aes256>(ks_enc, ssc)?;
                     decrypt::<cbc::Decryptor<aes::Aes256>>(ks_enc, Some(&ssc_enc), &encrypted_data)?
                 }
             };
@@ -3815,7 +3822,7 @@ fn test_oid2digestalg_known_oid() -> Result<(), EmrtdError> {
     )?;
     // Get hash itself somehow and assert
     let digest = use_digestalg(&mut *result, &hex!("DEADBEEF"));
-    assert_eq!(digest, &hex!("DEADBEEF"));
+    assert_eq!(digest, &hex!("5F78C33274E43FA9DE5659265C1D917E25C03722DCB0B8D27DB8D5FEAA813953"));
 
     Ok(())
 }
