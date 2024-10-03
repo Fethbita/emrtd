@@ -53,7 +53,7 @@ fn main() -> Result<(), EmrtdError> {
         }
     };
 
-    let mut sm_object = EmrtdComms::new(card);
+    let mut sm_object = EmrtdComms::<pcsc::Card>::new(card);
 
     // Get the card's ATR.
     info!("ATR from attribute: {}", bytes2hex(&sm_object.get_atr()?));

@@ -2674,9 +2674,24 @@ impl APDU {
     }
 }
 
-pub struct EmrtdComms {
+/// pcsc card functions used in EmrtdComms
+pub trait EmrtdCard {
+    fn get_attribute_owned(&self, attribute: pcsc::Attribute) -> Result<Vec<u8>, pcsc::Error>;
+    fn transmit<'buf>(&self, send_buffer: &[u8], receive_buffer: &'buf mut [u8]) -> Result<&'buf [u8], pcsc::Error>;
+}
+
+impl EmrtdCard for pcsc::Card {
+    fn get_attribute_owned(&self, attribute: pcsc::Attribute) -> Result<Vec<u8>, pcsc::Error> {
+        self.get_attribute_owned(attribute)
+    }
+    fn transmit<'buf>(&self, send_buffer: &[u8], receive_buffer: &'buf mut [u8]) -> Result<&'buf [u8], pcsc::Error> {
+        self.transmit(send_buffer, receive_buffer)
+    }
+}
+
+pub struct EmrtdComms<C: EmrtdCard> {
     /// The card interface used for communication with the eMRTD.
-    card: Card,
+    card: C,
     /// The encryption algorithm used for securing communication with the eMRTD.
     enc_alg: Option<EncryptionAlgorithm>,
     /// The MAC (Message Authentication Code) algorithm used for data integrity verification.
@@ -2691,7 +2706,7 @@ pub struct EmrtdComms {
     ssc: Option<Vec<u8>>,
 }
 
-impl EmrtdComms {
+impl<C: EmrtdCard> EmrtdComms<C> {
     /// Constructs a new `EmrtdComms` instance with the smart card interface.
     ///
     /// # Arguments
@@ -2702,7 +2717,7 @@ impl EmrtdComms {
     ///
     /// A new `EmrtdComms` instance.
     #[must_use]
-    pub fn new(card: Card) -> Self {
+    pub fn new(card: C) -> Self {
         Self {
             card,
             enc_alg: None,
@@ -3816,7 +3831,34 @@ fn test_oid2digestalg_unknown_oid() -> Result<(), EmrtdError> {
     Ok(())
 }
 
+#[cfg(test)]
+struct MockCard {}
+
+#[cfg(test)]
+impl EmrtdCard for MockCard {
+    fn get_attribute_owned(&self, attribute: pcsc::Attribute) -> Result<Vec<u8>, pcsc::Error> {
+        if attribute == AtrString {
+            return Ok(b"\x00\x01\x02\x03\x04\x05\x06\x07".to_vec())
+        }
+        return Err(pcsc::Error::InvalidAtr)
+    }
+    fn transmit<'buf>(&self, send_buffer: &[u8], receive_buffer: &'buf mut [u8]) -> Result<&'buf [u8], pcsc::Error> {
+        // TODO Hardcode examples from ICAO documents.
+        !todo!()
+    }
+}
+
 #[test]
 fn test_send() -> Result<(), EmrtdError> {
+    use hex_literal::hex;
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .init();
+
+    let mock_card = MockCard {};
+    let mut sm_object = EmrtdComms::<MockCard>::new(mock_card);
+    let result = sm_object.get_atr()?;
+    assert_eq!(&result, &hex!("0001020304050607"));
+
     Ok(())
 }
