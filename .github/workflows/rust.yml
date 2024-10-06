@@ -21,7 +21,7 @@ jobs:
 
     - name: Install deps
       run: |
-        apk add --no-cache pcsc-lite pcsc-lite-dev # For pcsc dependency
+        apk add --no-cache pcsc-lite-libs # For pcsc dependency
         apk add --no-cache musl-dev # For tracing-attributes dependency (needs crti.o)
         apk add --no-cache pkgconf openssl-dev gcc make perl-dev # For openssl dependency (see https://github.com/Fethbita/emrtd/pull/3)
 
