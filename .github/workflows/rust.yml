@@ -21,9 +21,9 @@ jobs:
 
     - name: Install deps
       run: |
-        apk add --no-cache pcsc-lite-dev \    # For pcsc dependency
-                           musl-dev           # For tracing-attributes dependency (needs crti.o)
-        apk add pkgconf openssl-dev # For openssl dependency (see https://github.com/Fethbita/emrtd/pull/3)
+        apk add --no-cache pcsc-lite-dev # For pcsc dependency
+        apk add --no-cache musl-dev # For tracing-attributes dependency (needs crti.o)
+        apk add --no-cache pkgconf openssl-dev # For openssl dependency (see https://github.com/Fethbita/emrtd/pull/3)
 
     - name: Build
       run: cargo build --verbose
