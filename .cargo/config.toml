@@ -1,7 +1,3 @@
-rustflags = [
-    "-C", "target-feature=-crt-static",
-]
-
-rustdocflags = [
-    "-C", "target-feature=-crt-static",
-]
+[build]
+rustflags = ["-C", "target-feature=-crt-static"]
+rustdocflags = ["-C", "target-feature=-crt-static"]
