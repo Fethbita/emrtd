@@ -14,6 +14,8 @@ env:
 jobs:
   build-and-push-image:
     runs-on: ubuntu-latest
+    permissions:
+      packages: write
 
     steps:
     - name: Set image name to lowercase
@@ -22,8 +24,6 @@ jobs:
         echo "image_name=ghcr.io/${GITHUB_REPOSITORY,,}" >>${GITHUB_OUTPUT}
 
     - if: github.ref_name == github.event.repository.default_branch
-      permissions:
-        packages: write
       name: Build and push
       uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 #v6.9.0
       with:
@@ -31,8 +31,6 @@ jobs:
         tags: ${{ steps.img-name.outputs.image_name }}:latest,${{ steps.img-name.outputs.image_name }}:${{ github.sha }}
 
     - if: github.ref_name != github.event.repository.default_branch
-      permissions:
-        packages: write
       name: Build and push
       uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 #v6.9.0
       with:
