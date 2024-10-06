@@ -12,7 +12,6 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     container:
       image: rust:1.81-alpine3.20
 
