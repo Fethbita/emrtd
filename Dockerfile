@@ -15,7 +15,7 @@ RUN apk update && \
     make \
     perl-dev \
     # For cargo-msrv
-    openssl-libs-static && \
+    openssl-libs-static # && \
     # Install cargo-audit and cargo-msrv
-    cargo install --version 0.20.1 cargo-audit && \
-    cargo install --version 0.15.1 cargo-msrv
+    #cargo install --version 0.20.1 cargo-audit && \
+    #cargo install --version 0.15.1 cargo-msrv
