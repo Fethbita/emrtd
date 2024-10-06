@@ -1,0 +1,40 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches: [ "main" ]
+    paths: ['Dockerfile']
+  pull_request:
+    branches: [ "main" ]
+    paths: ['Dockerfile']
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push-image:
+    runs-on: ubuntu-latest
+    container:
+      image: gcr.io/kaniko-project/executor:v1.22.0-debug
+
+    steps:
+    - uses: actions/checkout@d632683dd7b4114ad314bca15554477dd762a938 #v4.2.0
+
+    - if: github.ref_name == github.event.repository.default_branch
+      run: |
+        # Tag with latest
+        /kaniko/executor \
+          --context ${GITHUB_WORKSPACE} \
+          --dockerfile ${GITHUB_WORKSPACE}/Dockerfile \
+          --destination $IMAGE:latest \
+          --destination $IMAGE:$GITHUB_SHA \
+          --cache
+
+    - if: github.ref_name != github.event.repository.default_branch
+      run: |
+        /kaniko/executor \
+          --context ${GITHUB_WORKSPACE} \
+          --dockerfile ${GITHUB_WORKSPACE}/Dockerfile \
+          --destination $IMAGE:$GITHUB_SHA \
+          --cache
