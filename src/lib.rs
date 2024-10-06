@@ -2767,13 +2767,15 @@ impl<C: EmrtdCard, R: RngCore + CryptoRng + Default> EmrtdComms<C, R> {
     ///
     /// * `EmrtdError` in case of failure during sending or receiving an APDU.
     pub fn send(&mut self, apdu: &APDU, secure: bool) -> Result<(Vec<u8>, [u8; 2]), EmrtdError> {
+        let mut apdu = apdu.clone();
+        
         // Sending APDU in plaintext
         if !secure {
             let mut apdu_bytes = vec![];
             apdu_bytes.extend(&apdu.get_command_header());
-            apdu_bytes.extend(&apdu.lc.clone().unwrap_or_default());
-            apdu_bytes.extend(&apdu.cdata.clone().unwrap_or_default());
-            apdu_bytes.extend(&apdu.le.clone().unwrap_or_default());
+            apdu_bytes.extend(&apdu.lc.unwrap_or_default());
+            apdu_bytes.extend(&apdu.cdata.unwrap_or_default());
+            apdu_bytes.extend(&apdu.le.unwrap_or_default());
 
             trace!("Sending APDU: {}", bytes2hex(&apdu_bytes));
             let mut response_buffer = [0; pcsc::MAX_BUFFER_SIZE];
@@ -2845,7 +2847,6 @@ impl<C: EmrtdCard, R: RngCore + CryptoRng + Default> EmrtdComms<C, R> {
             ));
         }
         let pad_len = self.pad_len;
-        let mut apdu = apdu.clone();
 
         apdu.cla |= 0x0C;
 
@@ -3354,7 +3355,7 @@ impl<C: EmrtdCard, R: RngCore + CryptoRng + Default> EmrtdComms<C, R> {
         )?;
 
         let m_ifd = compute_mac(
-            &ba_key_mac.clone(),
+            &ba_key_mac,
             &padding_method_2(&e_ifd, 8)?,
             &MacAlgorithm::DES,
         )?;
@@ -3384,7 +3385,7 @@ impl<C: EmrtdCard, R: RngCore + CryptoRng + Default> EmrtdComms<C, R> {
         };
 
         let m_ic = compute_mac(
-            &ba_key_mac.clone(),
+            &ba_key_mac,
             &padding_method_2(&resp_data_enc[..resp_data_enc.len() - 8], 8)?,
             &MacAlgorithm::DES,
         )?;
