@@ -23,7 +23,7 @@ jobs:
       run: |
         apk add --no-cache pcsc-lite-dev # For pcsc dependency
         apk add --no-cache musl-dev # For tracing-attributes dependency (needs crti.o)
-        apk add --no-cache pkgconf openssl-dev gcc make perl-dev # For openssl dependency (see https://github.com/Fethbita/emrtd/pull/3)
+        apk add --no-cache pkgconf openssl-dev openssl-libs-static gcc make perl-dev # For openssl dependency (see https://github.com/Fethbita/emrtd/pull/3, https://github.com/rust-lang/docker-rust/issues/167)
 
     - name: Build
       run: cargo build --all-features --verbose
