@@ -112,6 +112,7 @@
 //!     let ef_sod = sm_object.read_data_from_ef(true)?;
 //!     info!("Data from the EF.SOD: {}", bytes2hex(&ef_sod));
 //!
+//!     #[cfg(feature = "passive_auth")]
 //!     let result;
 //!     #[cfg(feature = "passive_auth")]
 //!     {
