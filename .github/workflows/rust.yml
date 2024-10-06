@@ -24,6 +24,8 @@ jobs:
         apk add --no-cache pcsc-lite-dev # For pcsc dependency
         apk add --no-cache musl-dev # For tracing-attributes dependency (needs crti.o)
         apk add --no-cache pkgconf openssl-dev gcc make perl-dev # For openssl dependency (see https://github.com/Fethbita/emrtd/pull/3, https://github.com/rust-lang/docker-rust/issues/167)
+        cargo install --version 0.20.1 cargo-audit # For audit step
+        cargo install --version 0.15.1 cargo-msrv # For latest supported rust version
 
     - name: Build
       run: cargo build --all-features --verbose
@@ -32,9 +34,10 @@ jobs:
       run: cargo test --all-features --verbose
 
     - name: Audit
-      run: |
-        cargo install --version 0.20.1 cargo-audit
-        cargo audit
+      run: cargo audit
+
+    - name: Check rust version in Cargo.toml
+      run: cargo msrv verify -- cargo check --all-features --tests
 
     - name: Lint
       run: cargo clippy -- -D warnings
