@@ -13,18 +13,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.81-alpine3.20
+      image: ghcr.io/${{ github.repository }}:latest
 
     steps:
     - uses: actions/checkout@d632683dd7b4114ad314bca15554477dd762a938 #v4.2.0
-
-    - name: Install deps
-      run: |
-        apk add --no-cache pcsc-lite-dev # For pcsc dependency
-        apk add --no-cache musl-dev # For tracing-attributes dependency (needs crti.o)
-        apk add --no-cache pkgconf openssl-dev openssl-libs-static gcc make perl-dev # For openssl dependency (see https://github.com/Fethbita/emrtd/pull/3, https://github.com/rust-lang/docker-rust/issues/167)
-        # cargo install --version 0.20.1 cargo-audit # For audit step
-        # cargo install --version 0.15.1 cargo-msrv # For latest supported rust version
 
     - name: Build
       run: cargo build --all-features --verbose
