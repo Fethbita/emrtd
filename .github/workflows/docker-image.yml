@@ -9,6 +9,8 @@ on:
     paths: ['Dockerfile']
 
 env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -21,7 +23,7 @@ jobs:
     - name: Set image name to lowercase
       id: img-name
       run: |
-        echo "image_name=ghcr.io/${GITHUB_REPOSITORY,,}" >>${GITHUB_OUTPUT}
+        echo "image_name=${REGISTRY}/${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]' >>${GITHUB_OUTPUT}
 
     - name: Login to container registry
       uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
