@@ -26,8 +26,7 @@ jobs:
         context: .
         push: true
         tags:
-          - $IMAGE:latest
-          - $IMAGE:$GITHUB_SHA
+          - $IMAGE:latest,$IMAGE:$GITHUB_SHA
 
     - if: github.ref_name != github.event.repository.default_branch
       name: Build and push
@@ -35,5 +34,4 @@ jobs:
       with:
         context: .
         push: true
-        tags:
-          - $IMAGE:$GITHUB_SHA
+        tags: $IMAGE:$GITHUB_SHA
