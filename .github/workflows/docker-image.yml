@@ -2,8 +2,6 @@ name: Build and Push Docker Image
 on:
   push:
     paths: ['Dockerfile']
-  pull_request:
-    paths: ['Dockerfile']
 env:
   CONTAINER_REGISTRY: ${{ vars.CONTAINER_REGISTRY }}
   CONTAINER_IMAGE_NAME: ${{ vars.CONTAINER_IMAGE_NAME }}
