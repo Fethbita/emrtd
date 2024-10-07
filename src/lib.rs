@@ -163,7 +163,7 @@ use openssl::{
         X509StoreContext, X509,
     },
 };
-use pcsc::{Attribute::AtrString, Card};
+use pcsc::Attribute::AtrString;
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 #[cfg(feature = "passive_auth")]
 use rasn::{der, types::Oid};
@@ -1887,7 +1887,7 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
 /// # TODOs
 ///
 /// * Instead of returning error immediately after an error, collect all errors and return at the end
-/// of the function, i.e. in case of signature verification failure, maybe the user can still get the DG hashes
+///   of the function, i.e. in case of signature verification failure, maybe the user can still get the DG hashes
 #[cfg(feature = "passive_auth")]
 pub fn passive_authentication(
     ef_sod: &[u8],
@@ -3356,7 +3356,7 @@ impl<C: EmrtdCard, R: RngCore + CryptoRng + Default> EmrtdComms<C, R> {
         )?;
 
         let m_ifd = compute_mac(
-            &ba_key_mac,
+            ba_key_mac,
             &padding_method_2(&e_ifd, 8)?,
             &MacAlgorithm::DES,
         )?;
@@ -3386,7 +3386,7 @@ impl<C: EmrtdCard, R: RngCore + CryptoRng + Default> EmrtdComms<C, R> {
         };
 
         let m_ic = compute_mac(
-            &ba_key_mac,
+            ba_key_mac,
             &padding_method_2(&resp_data_enc[..resp_data_enc.len() - 8], 8)?,
             &MacAlgorithm::DES,
         )?;
