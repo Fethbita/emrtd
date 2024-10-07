@@ -16,6 +16,8 @@ RUN apk update && \
     perl-dev \
     # For cargo-msrv
     openssl-libs-static && \
+    # Install clippy
+    rustup component add clippy && \
     # Install cargo-audit and cargo-msrv
     cargo install --version 0.20.1 cargo-audit && \
     cargo install --version 0.15.1 cargo-msrv
