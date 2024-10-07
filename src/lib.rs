@@ -113,10 +113,12 @@
 //!     info!("Data from the EF.SOD: {}", bytes2hex(&ef_sod));
 //!
 //!     #[cfg(feature = "passive_auth")]
+//!     let result;
+//!     #[cfg(feature = "passive_auth")]
 //!     {
 //!         let master_list = include_bytes!("../data/DE_ML_2024-04-10-10-54-13.ml");
 //!         let csca_cert_store = parse_master_list(master_list)?;
-//!         let result = passive_authentication(&ef_sod, &csca_cert_store).unwrap();
+//!         result = passive_authentication(&ef_sod, &csca_cert_store).unwrap();
 //!         info!("{:?} {:?} {:?}", result.0.type_(), result.1, result.2);
 //!     }
 //!
@@ -2903,7 +2905,7 @@ impl EmrtdComms {
         }
 
         let padded_header = padding_method_2(&apdu.get_command_header(), pad_len)?;
-        let n = padding_method_2(&[&ssc, (&*padded_header), &payload].concat(), pad_len)?;
+        let n = padding_method_2(&[ssc, (&*padded_header), &payload].concat(), pad_len)?;
         let cc = compute_mac(ks_mac, &n, mac_alg)?;
 
         let do8e = [b"\x8E", (&*int2asn1len(cc.len())), &cc].concat();
@@ -3043,7 +3045,7 @@ impl EmrtdComms {
 
         let k = padding_method_2(
             &[
-                &ssc,
+                ssc,
                 do85.unwrap_or_default(),
                 do87.unwrap_or_default(),
                 do99.unwrap_or_default(),

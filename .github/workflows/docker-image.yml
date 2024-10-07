@@ -1,0 +1,31 @@
+name: Build and Push Docker Image
+on:
+  push:
+    paths: ['Dockerfile', '.github/workflows/docker-image.yml']
+env:
+  CONTAINER_REGISTRY: ${{ vars.CONTAINER_REGISTRY }}
+  CONTAINER_IMAGE_NAME: ${{ vars.CONTAINER_IMAGE_NAME }}
+jobs:
+  build-and-push-image:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Login to container registry
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ${{ env.CONTAINER_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - if: github.ref_name == github.event.repository.default_branch
+        name: Build and push
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6.9.0
+        with:
+          push: true
+          tags: ${{ env.CONTAINER_REGISTRY }}/${{ env.CONTAINER_IMAGE_NAME }}:latest,${{ env.CONTAINER_REGISTRY }}/${{ env.CONTAINER_IMAGE_NAME }}:${{ github.sha }}
+      - if: github.ref_name != github.event.repository.default_branch
+        name: Build and push
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6.9.0
+        with:
+          push: true
+          tags: ${{ env.CONTAINER_REGISTRY }}/${{ env.CONTAINER_IMAGE_NAME }}:${{ github.sha }}
