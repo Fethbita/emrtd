@@ -112,6 +112,7 @@
 //!     let ef_sod = sm_object.read_data_from_ef(true)?;
 //!     info!("Data from the EF.SOD: {}", bytes2hex(&ef_sod));
 //!
+//!     #[cfg(feature = "passive_auth")]
 //!     let result;
 //!     #[cfg(feature = "passive_auth")]
 //!     {
@@ -2902,7 +2903,7 @@ impl<C: EmrtdCard, R: RngCore + CryptoRng + Default> EmrtdComms<C, R> {
         }
 
         let padded_header = padding_method_2(&apdu.get_command_header(), pad_len)?;
-        let n = padding_method_2(&[&ssc, (&*padded_header), &payload].concat(), pad_len)?;
+        let n = padding_method_2(&[ssc, (&*padded_header), &payload].concat(), pad_len)?;
         let cc = compute_mac(ks_mac, &n, mac_alg)?;
 
         let do8e = [b"\x8E", (&*int2asn1len(cc.len())), &cc].concat();
@@ -3042,7 +3043,7 @@ impl<C: EmrtdCard, R: RngCore + CryptoRng + Default> EmrtdComms<C, R> {
 
         let k = padding_method_2(
             &[
-                &ssc,
+                ssc,
                 do85.unwrap_or_default(),
                 do87.unwrap_or_default(),
                 do99.unwrap_or_default(),
