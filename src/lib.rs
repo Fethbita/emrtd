@@ -75,7 +75,7 @@
 //!         }
 //!     };
 //!
-//!     let mut sm_object = EmrtdComms::<pcsc::Card>::new(card);
+//!     let mut sm_object = EmrtdComms::<pcsc::Card>::new(card, rand::rngs::OsRng);
 //!
 //!     // Get the card's ATR.
 //!     info!("ATR from attribute: {}", bytes2hex(&sm_object.get_atr()?));
@@ -2690,7 +2690,7 @@ impl EmrtdCard for pcsc::Card {
     }
 }
 
-pub struct EmrtdComms<C: EmrtdCard, R: RngCore + CryptoRng + Default = OsRng> {
+pub struct EmrtdComms<C: EmrtdCard, R: RngCore + CryptoRng = OsRng> {
     rng: R,
     /// The card interface used for communication with the eMRTD.
     card: C,
@@ -2708,7 +2708,7 @@ pub struct EmrtdComms<C: EmrtdCard, R: RngCore + CryptoRng + Default = OsRng> {
     ssc: Option<Vec<u8>>,
 }
 
-impl<C: EmrtdCard, R: RngCore + CryptoRng + Default> EmrtdComms<C, R> {
+impl<C: EmrtdCard, R: RngCore + CryptoRng> EmrtdComms<C, R> {
     /// Constructs a new `EmrtdComms` instance with the smart card interface.
     ///
     /// # Arguments
@@ -2719,9 +2719,9 @@ impl<C: EmrtdCard, R: RngCore + CryptoRng + Default> EmrtdComms<C, R> {
     ///
     /// A new `EmrtdComms` instance.
     #[must_use]
-    pub fn new(card: C) -> Self {
+    pub fn new(card: C, rng: R) -> Self {
         Self {
-            rng: R::default(),
+            rng,
             card,
             enc_alg: None,
             mac_alg: None,
@@ -3505,24 +3505,23 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
-    struct MockRng {
+    struct MockCryptoRng {
         data: Vec<u8>,
         index: usize,
     }
 
-    impl Default for MockRng {
-        fn default() -> MockRng {
-            MockRng {
-                data: hex!("781723860C06C226
-                            0B795240CB7049B01C19B33E32804F0B").to_vec(),
+    impl MockCryptoRng {
+        fn new(data: Vec<u8>) -> MockCryptoRng {
+            MockCryptoRng {
+                data,
                 index: 0,
             }
         }
     }
 
-    impl CryptoRng for MockRng {}
+    impl CryptoRng for MockCryptoRng {}
 
-    impl RngCore for MockRng {
+    impl RngCore for MockCryptoRng {
         fn next_u32(&mut self) -> u32 {
             unimplemented!()
         }
@@ -3900,7 +3899,8 @@ mod tests {
         use hex_literal::hex;
 
         let mock_card = MockCard {};
-        let mut sm_object = EmrtdComms::<MockCard, MockRng>::new(mock_card);
+        let mock_crypto_rng = MockCryptoRng::new(vec![]);
+        let mut sm_object = EmrtdComms::<MockCard, MockCryptoRng>::new(mock_card, mock_crypto_rng);
         let result = sm_object.get_atr()?;
         assert_eq!(&result, &hex!("0001020304050607"));
 
@@ -3916,7 +3916,9 @@ mod tests {
         use hex_literal::hex;
 
         let mock_card = MockCard {};
-        let mut sm_object = EmrtdComms::<MockCard, MockRng>::new(mock_card);
+        let mock_crypto_rng = MockCryptoRng::new(
+            hex!("781723860C06C226 0B795240CB7049B01C19B33E32804F0B").to_vec());
+        let mut sm_object = EmrtdComms::<MockCard, MockCryptoRng>::new(mock_card, mock_crypto_rng);
         let result = sm_object.get_atr()?;
         assert_eq!(&result, &hex!("0001020304050607"));
 

@@ -1,6 +1,7 @@
 use std::env;
 
 use emrtd::{bytes2hex, get_jpeg_from_ef_dg2, other_mrz, EmrtdComms, EmrtdError};
+use rand::rngs::OsRng;
 use tracing::{error, info};
 
 #[cfg(feature = "passive_auth")]
@@ -53,7 +54,7 @@ fn main() -> Result<(), EmrtdError> {
         }
     };
 
-    let mut sm_object = EmrtdComms::<pcsc::Card>::new(card);
+    let mut sm_object = EmrtdComms::<pcsc::Card>::new(card, OsRng);
 
     // Get the card's ATR.
     info!("ATR from attribute: {}", bytes2hex(&sm_object.get_atr()?));
