@@ -3481,11 +3481,12 @@ mod tests {
     impl EmrtdCard for MockCard {
         fn get_attribute_owned(&self, attribute: pcsc::Attribute) -> Result<Vec<u8>, pcsc::Error> {
             if attribute == AtrString {
-                return Ok(b"\x00\x01\x02\x03\x04\x05\x06\x07".to_vec())
+                return Ok(hex!("0001020304050607").to_vec())
             }
             return Err(pcsc::Error::InvalidAtr)
         }
         fn transmit<'buf>(&self, send_buffer: &[u8], receive_buffer: &'buf mut [u8]) -> Result<&'buf [u8], pcsc::Error> {
+            // Examples taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix D.3 & D.4
             // Select eMRTD application
             if send_buffer == hex!("00A4040C07A0000002471001") {
                 return Ok(&hex!("9000"));
@@ -3497,6 +3498,16 @@ mod tests {
                                         56A8799FAE2F498F76ED92F25F1448EEA8AD90A7 28") {
                 return Ok(&hex!("46B9342A41396CD7386BF5803104D7CEDC122B91
                                 32139BAF2EEDC94EE178534F2F2D235D074D7449 9000"));
+            // Select EF.COM command
+            } else if send_buffer == hex!("0CA4020C158709016375432908C0 44F68E08BF8B92D635FF24F800") {
+                return Ok(&hex!("990290008E08FA855A5D4C50A8ED 9000"))
+            // Read Binary of first four bytes
+            } else if send_buffer == hex!("0CB000000D9701048E08ED6705417E96BA5500") {
+                return Ok(&hex!("8709019FF0EC34F992265199029000 8E08AD55CC17140B2DED 9000"))
+            // Read Binary of remaining 18 bytes from offset 4
+            } else if send_buffer == hex!("0CB000040D9701128E082EA28A70F3C7B53500") {
+                return Ok(&hex!("871901FB9235F4E4037F2327DCC8964F1F9B8C30F42
+                                C8E2FFF224A990290008E08C8B2787EAEA07D749000"))
             } else {
                 // Return some random error
                 return Err(pcsc::Error::CancelledByUser);
@@ -3908,7 +3919,7 @@ mod tests {
     }
 
     #[test]
-    fn test_establish_bac_session_keys() -> Result<(), EmrtdError> {
+    fn test_bac_secure_messaging() -> Result<(), EmrtdError> {
         tracing_subscriber::fmt()
             .with_max_level(tracing::Level::TRACE)
             .init();
@@ -3916,6 +3927,7 @@ mod tests {
         use hex_literal::hex;
 
         let mock_card = MockCard {};
+        // Examples taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix D.3 & D.4
         let mock_crypto_rng = MockCryptoRng::new(
             hex!("781723860C06C226 0B795240CB7049B01C19B33E32804F0B").to_vec());
         let mut sm_object = EmrtdComms::<MockCard, MockCryptoRng>::new(mock_card, mock_crypto_rng);
@@ -3925,6 +3937,17 @@ mod tests {
         sm_object.select_emrtd_application()?;
 
         sm_object.establish_bac_session_keys(b"L898902C<369080619406236")?;
+
+        // ks_enc is a DES key in case of BAC and the third BAC key is empty (repeats the first key)
+        assert_eq!(*sm_object.ks_enc.as_ref().unwrap(), hex!("979EC13B1CBFE9DCD01AB0FED307EAE5 979EC13B1CBFE9DC"));
+        assert_eq!(*sm_object.ks_mac.as_ref().unwrap(), hex!("F1CB1F1FB5ADF208806B89DC579DC1F8"));
+        assert_eq!(*sm_object.ssc.as_ref().unwrap(), hex!("887022120C06C226"));
+
+        sm_object.select_ef(&hex!("011E"), "EF.COM", true)?;
+
+        let ef_com = sm_object.read_data_from_ef(true)?;
+
+        assert_eq!(ef_com, hex!("60145F0104303130365F36063034303030305C026175"));
 
         Ok(())
     }
