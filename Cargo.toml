@@ -34,5 +34,4 @@ rasn-pkix = { version = "0.16.6", optional = true}
 hex-literal = "0.4.1"
 
 [features]
-default = ["passive_auth"]
 passive_auth = ["dep:openssl", "dep:rasn", "dep:rasn-cms", "dep:rasn-pkix"]

@@ -3485,7 +3485,7 @@ mod tests {
             }
             return Err(pcsc::Error::InvalidAtr)
         }
-        fn transmit<'buf>(&self, send_buffer: &[u8], receive_buffer: &'buf mut [u8]) -> Result<&'buf [u8], pcsc::Error> {
+        fn transmit<'buf>(&self, send_buffer: &[u8], _receive_buffer: &'buf mut [u8]) -> Result<&'buf [u8], pcsc::Error> {
             // Examples taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix D.3 & D.4
             // Select eMRTD application
             if send_buffer == hex!("00A4040C07A0000002471001") {
@@ -3548,7 +3548,7 @@ mod tests {
             }
         }
 
-        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
+        fn try_fill_bytes(&mut self, _dest: &mut [u8]) -> Result<(), rand::Error> {
             unimplemented!()
         }
     }
@@ -3920,10 +3920,6 @@ mod tests {
 
     #[test]
     fn test_bac_secure_messaging() -> Result<(), EmrtdError> {
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            .init();
-
         use hex_literal::hex;
 
         let mock_card = MockCard {};
