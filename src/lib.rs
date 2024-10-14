@@ -75,7 +75,7 @@
 //!         }
 //!     };
 //!
-//!     let mut sm_object = EmrtdComms::new(card);
+//!     let mut sm_object = EmrtdComms::<pcsc::Card>::new(card, rand::rngs::OsRng);
 //!
 //!     // Get the card's ATR.
 //!     info!("ATR from attribute: {}", bytes2hex(&sm_object.get_atr()?));
@@ -163,8 +163,8 @@ use openssl::{
         X509StoreContext, X509,
     },
 };
-use pcsc::{Attribute::AtrString, Card};
-use rand::{rngs::OsRng, RngCore};
+use pcsc::Attribute::AtrString;
+use rand::{rngs::OsRng, CryptoRng, RngCore};
 #[cfg(feature = "passive_auth")]
 use rasn::{der, types::Oid};
 #[cfg(feature = "passive_auth")]
@@ -1887,7 +1887,7 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
 /// # TODOs
 ///
 /// * Instead of returning error immediately after an error, collect all errors and return at the end
-/// of the function, i.e. in case of signature verification failure, maybe the user can still get the DG hashes
+///   of the function, i.e. in case of signature verification failure, maybe the user can still get the DG hashes
 #[cfg(feature = "passive_auth")]
 pub fn passive_authentication(
     ef_sod: &[u8],
@@ -2675,9 +2675,25 @@ impl APDU {
     }
 }
 
-pub struct EmrtdComms {
+/// pcsc card functions used in EmrtdComms
+pub trait EmrtdCard {
+    fn get_attribute_owned(&self, attribute: pcsc::Attribute) -> Result<Vec<u8>, pcsc::Error>;
+    fn transmit<'buf>(&self, send_buffer: &[u8], receive_buffer: &'buf mut [u8]) -> Result<&'buf [u8], pcsc::Error>;
+}
+
+impl EmrtdCard for pcsc::Card {
+    fn get_attribute_owned(&self, attribute: pcsc::Attribute) -> Result<Vec<u8>, pcsc::Error> {
+        self.get_attribute_owned(attribute)
+    }
+    fn transmit<'buf>(&self, send_buffer: &[u8], receive_buffer: &'buf mut [u8]) -> Result<&'buf [u8], pcsc::Error> {
+        self.transmit(send_buffer, receive_buffer)
+    }
+}
+
+pub struct EmrtdComms<C: EmrtdCard, R: RngCore + CryptoRng = OsRng> {
+    rng: R,
     /// The card interface used for communication with the eMRTD.
-    card: Card,
+    card: C,
     /// The encryption algorithm used for securing communication with the eMRTD.
     enc_alg: Option<EncryptionAlgorithm>,
     /// The MAC (Message Authentication Code) algorithm used for data integrity verification.
@@ -2692,7 +2708,7 @@ pub struct EmrtdComms {
     ssc: Option<Vec<u8>>,
 }
 
-impl EmrtdComms {
+impl<C: EmrtdCard, R: RngCore + CryptoRng> EmrtdComms<C, R> {
     /// Constructs a new `EmrtdComms` instance with the smart card interface.
     ///
     /// # Arguments
@@ -2703,8 +2719,9 @@ impl EmrtdComms {
     ///
     /// A new `EmrtdComms` instance.
     #[must_use]
-    pub fn new(card: Card) -> Self {
+    pub fn new(card: C, rng: R) -> Self {
         Self {
+            rng,
             card,
             enc_alg: None,
             mac_alg: None,
@@ -2751,13 +2768,15 @@ impl EmrtdComms {
     ///
     /// * `EmrtdError` in case of failure during sending or receiving an APDU.
     pub fn send(&mut self, apdu: &APDU, secure: bool) -> Result<(Vec<u8>, [u8; 2]), EmrtdError> {
+        let mut apdu = apdu.clone();
+        
         // Sending APDU in plaintext
         if !secure {
             let mut apdu_bytes = vec![];
             apdu_bytes.extend(&apdu.get_command_header());
-            apdu_bytes.extend(&apdu.lc.clone().unwrap_or_default());
-            apdu_bytes.extend(&apdu.cdata.clone().unwrap_or_default());
-            apdu_bytes.extend(&apdu.le.clone().unwrap_or_default());
+            apdu_bytes.extend(&apdu.lc.unwrap_or_default());
+            apdu_bytes.extend(&apdu.cdata.unwrap_or_default());
+            apdu_bytes.extend(&apdu.le.unwrap_or_default());
 
             trace!("Sending APDU: {}", bytes2hex(&apdu_bytes));
             let mut response_buffer = [0; pcsc::MAX_BUFFER_SIZE];
@@ -2829,7 +2848,6 @@ impl EmrtdComms {
             ));
         }
         let pad_len = self.pad_len;
-        let mut apdu = apdu.clone();
 
         apdu.cla |= 0x0C;
 
@@ -3327,9 +3345,9 @@ impl EmrtdComms {
         };
 
         let mut rnd_ifd: [u8; 8] = [0; 8];
-        OsRng.fill_bytes(&mut rnd_ifd);
+        self.rng.fill_bytes(&mut rnd_ifd);
         let mut k_ifd: [u8; 16] = [0; 16];
-        OsRng.fill_bytes(&mut k_ifd);
+        self.rng.fill_bytes(&mut k_ifd);
 
         let e_ifd = encrypt::<cbc::Encryptor<des::TdesEde3>>(
             ba_key_enc,
@@ -3338,7 +3356,7 @@ impl EmrtdComms {
         )?;
 
         let m_ifd = compute_mac(
-            &ba_key_mac.clone(),
+            ba_key_mac,
             &padding_method_2(&e_ifd, 8)?,
             &MacAlgorithm::DES,
         )?;
@@ -3368,7 +3386,7 @@ impl EmrtdComms {
         };
 
         let m_ic = compute_mac(
-            &ba_key_mac.clone(),
+            ba_key_mac,
             &padding_method_2(&resp_data_enc[..resp_data_enc.len() - 8], 8)?,
             &MacAlgorithm::DES,
         )?;
@@ -3453,371 +3471,480 @@ impl EmrtdComms {
     }
 }
 
-#[test]
-fn test_calculate_check_digit_valid_data() -> Result<(), EmrtdError> {
-    // Examples taken from https://www.icao.int/publications/Documents/9303_p3_cons_en.pdf Appendix A
-    let result = calculate_check_digit("520727");
-    assert_eq!(result?, '3');
-
-    let result = calculate_check_digit("AB2134<<<");
-    assert_eq!(result?, '5');
-
-    let result = calculate_check_digit("HA672242<658022549601086<<<<<<<<<<<<<<0");
-    assert_eq!(result?, '8');
-
-    let result = calculate_check_digit("D231458907<<<<<<<<<<<<<<<34071279507122<<<<<<<<<<<");
-    assert_eq!(result?, '2');
-
-    let result = calculate_check_digit("HA672242<658022549601086<<<<<<<");
-    assert_eq!(result?, '8');
-
-    let result = calculate_check_digit("");
-    assert_eq!(result?, '0');
-
-    let result = calculate_check_digit("1");
-    assert_eq!(result?, '7');
-
-    Ok(())
-}
-
-#[test]
-fn test_calculate_check_digit_invalid_character() -> Result<(), EmrtdError> {
-    let result = calculate_check_digit("ABC*123");
-    assert!(result.is_err_and(|e| matches!(e, EmrtdError::ParseMrzCharError('*'))));
-    Ok(())
-}
-
-#[test]
-fn test_other_mrz_valid_input() -> Result<(), EmrtdError> {
-    // Example taken from https://www.icao.int/publications/Documents/9303_p4_cons_en.pdf Appendix B
-    let result = other_mrz("L898902C3", "740812", "120415");
-    assert_eq!(result?, String::from("L898902C3674081221204159"));
-
-    // Examples taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix D.2
-    let result = other_mrz("D23145890734", "340712", "950712");
-    assert_eq!(result?, String::from("D23145890734934071279507122"));
-
-    let result = other_mrz("L898902C<", "690806", "940623");
-    assert_eq!(result?, String::from("L898902C<369080619406236"));
-
-    // Example taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix G
-    let result = other_mrz("T22000129", "640812", "101031");
-    assert_eq!(result?, String::from("T22000129364081251010318"));
-
-    Ok(())
-}
-
-#[test]
-fn test_other_mrz_invalid_input() -> Result<(), EmrtdError> {
-    let result = other_mrz("L898902C300000000000000", "740812", "120415");
-    assert!(
-        result.is_err_and(|e| matches!(e, EmrtdError::ParseMrzFieldError("Document number", _)))
-    );
-
-    let result = other_mrz("L898902C3", "7408121", "120415");
-    assert!(result.is_err_and(|e| matches!(e, EmrtdError::ParseMrzFieldError("Birth date", _))));
-
-    let result = other_mrz("L898902C3", "740812", "1204151");
-    assert!(result.is_err_and(|e| matches!(e, EmrtdError::ParseMrzFieldError("Expiry date", _))));
-
-    Ok(())
-}
-
-#[test]
-fn test_len2int_valid_input() -> Result<(), EmrtdError> {
+#[cfg(test)]
+mod tests {
+    use super::*;
     use hex_literal::hex;
 
-    let result = len2int(&hex!("2A"), 0);
-    assert_eq!(result?, (1, 42));
+    struct MockCard {}
 
-    let result = len2int(&hex!("302A"), 1);
-    assert_eq!(result?, (2, 42));
+    impl EmrtdCard for MockCard {
+        fn get_attribute_owned(&self, attribute: pcsc::Attribute) -> Result<Vec<u8>, pcsc::Error> {
+            if attribute == AtrString {
+                return Ok(hex!("0001020304050607").to_vec())
+            }
+            return Err(pcsc::Error::InvalidAtr)
+        }
+        fn transmit<'buf>(&self, send_buffer: &[u8], _receive_buffer: &'buf mut [u8]) -> Result<&'buf [u8], pcsc::Error> {
+            // Examples taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix D.3 & D.4
+            // Select eMRTD application
+            if send_buffer == hex!("00A4040C07A0000002471001") {
+                return Ok(&hex!("9000"));
+            // Request an 8 byte random number
+            } else if send_buffer == hex!("0084000008") {
+                return Ok(&hex!("4608F91988702212 9000"));
+            // EXTERNAL AUTHENTICATE command
+            } else if send_buffer == hex!("0082000028 72C29C2371CC9BDB65B779B8E8D37B29ECC154AA
+                                        56A8799FAE2F498F76ED92F25F1448EEA8AD90A7 28") {
+                return Ok(&hex!("46B9342A41396CD7386BF5803104D7CEDC122B91
+                                32139BAF2EEDC94EE178534F2F2D235D074D7449 9000"));
+            // Select EF.COM command
+            } else if send_buffer == hex!("0CA4020C158709016375432908C0 44F68E08BF8B92D635FF24F800") {
+                return Ok(&hex!("990290008E08FA855A5D4C50A8ED 9000"))
+            // Read Binary of first four bytes
+            } else if send_buffer == hex!("0CB000000D9701048E08ED6705417E96BA5500") {
+                return Ok(&hex!("8709019FF0EC34F992265199029000 8E08AD55CC17140B2DED 9000"))
+            // Read Binary of remaining 18 bytes from offset 4
+            } else if send_buffer == hex!("0CB000040D9701128E082EA28A70F3C7B53500") {
+                return Ok(&hex!("871901FB9235F4E4037F2327DCC8964F1F9B8C30F42
+                                C8E2FFF224A990290008E08C8B2787EAEA07D749000"))
+            } else {
+                // Return some random error
+                return Err(pcsc::Error::CancelledByUser);
+            }
+        }
+    }
 
-    let result = len2int(&hex!("308207E8"), 1);
-    assert_eq!(result?, (4, 2024));
+    #[derive(Clone, Debug)]
+    struct MockCryptoRng {
+        data: Vec<u8>,
+        index: usize,
+    }
 
-    let result = len2int(&hex!("3030308207E8"), 3);
-    assert_eq!(result?, (6, 2024));
+    impl MockCryptoRng {
+        fn new(data: Vec<u8>) -> MockCryptoRng {
+            MockCryptoRng {
+                data,
+                index: 0,
+            }
+        }
+    }
 
-    let result = len2int(&hex!("3083010000"), 1);
-    assert_eq!(result?, (5, 0x0001_0000));
-    Ok(())
-}
+    impl CryptoRng for MockCryptoRng {}
 
-#[test]
-fn test_len2int_invalid_input() -> Result<(), EmrtdError> {
-    use hex_literal::hex;
+    impl RngCore for MockCryptoRng {
+        fn next_u32(&mut self) -> u32 {
+            unimplemented!()
+        }
 
-    let result = len2int(&hex!("30"), 1);
-    assert!(result.is_err_and(|e| matches!(e, EmrtdError::ParseAsn1DataError(2, 1))));
+        fn next_u64(&mut self) -> u64 {
+            unimplemented!()
+        }
 
-    let result = len2int(&hex!("3082"), 1);
-    assert!(result.is_err_and(|e| matches!(e, EmrtdError::ParseAsn1DataError(4, 2))));
-    Ok(())
-}
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            for byte in dest.iter_mut() {
+                *byte = self.data[self.index];
+                self.index = (self.index + 1) % self.data.len();
+            }
+        }
 
-#[test]
-fn test_int2asn1len() {
-    use hex_literal::hex;
+        fn try_fill_bytes(&mut self, _dest: &mut [u8]) -> Result<(), rand::Error> {
+            unimplemented!()
+        }
+    }
 
-    let result = int2asn1len(0);
-    assert_eq!(result, hex!("00").to_vec());
+    #[test]
+    fn test_calculate_check_digit_valid_data() -> Result<(), EmrtdError> {
+        // Examples taken from https://www.icao.int/publications/Documents/9303_p3_cons_en.pdf Appendix A
+        let result = calculate_check_digit("520727");
+        assert_eq!(result?, '3');
 
-    let result = int2asn1len(42);
-    assert_eq!(result, hex!("2A").to_vec());
+        let result = calculate_check_digit("AB2134<<<");
+        assert_eq!(result?, '5');
 
-    let result = int2asn1len(127);
-    assert_eq!(result, hex!("7F").to_vec());
+        let result = calculate_check_digit("HA672242<658022549601086<<<<<<<<<<<<<<0");
+        assert_eq!(result?, '8');
 
-    let result = int2asn1len(2024);
-    assert_eq!(result, hex!("8207E8").to_vec());
+        let result = calculate_check_digit("D231458907<<<<<<<<<<<<<<<34071279507122<<<<<<<<<<<");
+        assert_eq!(result?, '2');
 
-    let result = int2asn1len(0x0001_0000);
-    assert_eq!(result, hex!("83010000").to_vec());
+        let result = calculate_check_digit("HA672242<658022549601086<<<<<<<");
+        assert_eq!(result?, '8');
 
-    let result = len2int(&int2asn1len(0x0001_0000), 0)
-        .expect("Value should be valid")
-        .1;
-    assert_eq!(result, 0x0001_0000);
+        let result = calculate_check_digit("");
+        assert_eq!(result?, '0');
 
-    let result = len2int(&int2asn1len(usize::MAX), 0)
-        .expect("Value should be valid")
-        .1;
-    assert_eq!(result, usize::MAX);
-}
+        let result = calculate_check_digit("1");
+        assert_eq!(result?, '7');
 
-#[test]
-fn test_generate_key_seed_valid() -> Result<(), EmrtdError> {
-    use hex_literal::hex;
+        Ok(())
+    }
 
-    // Example taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix D
-    let result = generate_key_seed(b"L898902C<369080619406236");
-    assert_eq!(&result?[..16], &hex!("239AB9CB282DAF66231DC5A4DF6BFBAE"));
+    #[test]
+    fn test_calculate_check_digit_invalid_character() -> Result<(), EmrtdError> {
+        let result = calculate_check_digit("ABC*123");
+        assert!(result.is_err_and(|e| matches!(e, EmrtdError::ParseMrzCharError('*'))));
+        Ok(())
+    }
 
-    // Example taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix G
-    let result = generate_key_seed(b"T22000129364081251010318");
-    assert_eq!(
-        &result?,
-        &hex!("7E2D2A41 C74EA0B3 8CD36F86 3939BFA8 E9032AAD")
-    );
+    #[test]
+    fn test_other_mrz_valid_input() -> Result<(), EmrtdError> {
+        // Example taken from https://www.icao.int/publications/Documents/9303_p4_cons_en.pdf Appendix B
+        let result = other_mrz("L898902C3", "740812", "120415");
+        assert_eq!(result?, String::from("L898902C3674081221204159"));
 
-    Ok(())
-}
+        // Examples taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix D.2
+        let result = other_mrz("D23145890734", "340712", "950712");
+        assert_eq!(result?, String::from("D23145890734934071279507122"));
 
-#[test]
-fn test_compute_key_valid_input() -> Result<(), EmrtdError> {
-    use hex_literal::hex;
+        let result = other_mrz("L898902C<", "690806", "940623");
+        assert_eq!(result?, String::from("L898902C<369080619406236"));
 
-    // Example taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix D.1
-    let key_seed = hex!("239AB9CB282DAF66231DC5A4DF6BFBAE");
-    let result = compute_key(
-        key_seed.as_ref(),
-        &KeyType::Encryption,
-        &EncryptionAlgorithm::DES3,
-    );
-    assert_eq!(
-        &result?,
-        &hex!("AB94FDECF2674FDFB9B391F85D7F76F2AB94FDECF2674FDF")
-    );
-    let result = compute_key(key_seed.as_ref(), &KeyType::Mac, &EncryptionAlgorithm::DES3);
-    assert_eq!(&result?, &hex!("7962D9ECE03D1ACD4C76089DCE131543"));
+        // Example taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix G
+        let result = other_mrz("T22000129", "640812", "101031");
+        assert_eq!(result?, String::from("T22000129364081251010318"));
 
-    // Example taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix G.1
-    let shared_secret =
-        hex!("28768D20 701247DA E81804C9 E780EDE5 82A9996D B4A31502 0B273319 7DB84925");
-    let result = compute_key(
-        shared_secret.as_ref(),
-        &KeyType::Encryption,
-        &EncryptionAlgorithm::AES128,
-    );
-    assert_eq!(&result?, &hex!("F5F0E35C 0D7161EE 6724EE51 3A0D9A7F"));
-    let result = compute_key(
-        shared_secret.as_ref(),
-        &KeyType::Mac,
-        &EncryptionAlgorithm::AES128,
-    );
-    assert_eq!(&result?, &hex!("FE251C78 58B356B2 4514B3BD 5F4297D1"));
+        Ok(())
+    }
 
-    // Example taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix G.2
-    let shared_secret = hex!(
-        "6BABC7B3 A72BCD7E A385E4C6 2DB2625B
-        D8613B24 149E146A 629311C4 CA6698E3
-        8B834B6A 9E9CD718 4BA8834A FF5043D4
-        36950C4C 1E783236 7C10CB8C 314D40E5
-        990B0DF7 013E64B4 549E2270 923D06F0
-        8CFF6BD3 E977DDE6 ABE4C31D 55C0FA2E
-        465E553E 77BDF75E 3193D383 4FC26E8E
-        B1EE2FA1 E4FC97C1 8C3F6CFF FE2607FD"
-    );
-    let result = compute_key(
-        shared_secret.as_ref(),
-        &KeyType::Encryption,
-        &EncryptionAlgorithm::AES128,
-    );
-    assert_eq!(&result?, &hex!("2F7F46AD CC9E7E52 1B45D192 FAFA9126"));
-    let result = compute_key(
-        shared_secret.as_ref(),
-        &KeyType::Mac,
-        &EncryptionAlgorithm::AES128,
-    );
-    assert_eq!(&result?, &hex!("805A1D27 D45A5116 F73C5446 9462B7D8"));
+    #[test]
+    fn test_other_mrz_invalid_input() -> Result<(), EmrtdError> {
+        let result = other_mrz("L898902C300000000000000", "740812", "120415");
+        assert!(
+            result.is_err_and(|e| matches!(e, EmrtdError::ParseMrzFieldError("Document number", _)))
+        );
 
-    // Example taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix H.1
-    let shared_secret =
-        hex!("4F150FDE 1D4F0E38 E95017B8 91BAE171 33A0DF45 B0D3E18B 60BA7BEA FDC2C713");
-    let result = compute_key(
-        shared_secret.as_ref(),
-        &KeyType::Encryption,
-        &EncryptionAlgorithm::AES128,
-    );
-    assert_eq!(&result?, &hex!("0D3FEB33 251A6370 893D62AE 8DAAF51B"));
-    let result = compute_key(
-        shared_secret.as_ref(),
-        &KeyType::Mac,
-        &EncryptionAlgorithm::AES128,
-    );
-    assert_eq!(&result?, &hex!("B01E89E3 D9E8719E 586B50B4 A7506E0B"));
+        let result = other_mrz("L898902C3", "7408121", "120415");
+        assert!(result.is_err_and(|e| matches!(e, EmrtdError::ParseMrzFieldError("Birth date", _))));
 
-    // Example taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix H.2
-    let shared_secret = hex!(
-        "419410D6 C0A17A4C 07C54872 CE1CBCEB
-        0A2705C1 A434C8A8 9A4CFE41 F1D78124
-        CA7EC52B DE7615E5 345E48AB 1ABB6E7D
-        1D59A57F 3174084D 3CA45703 97C1F622
-        28BDFDB2 DA191EA2 239E2C06 0DBE3BBC
-        23C2FCD0 AF12E0F9 E0B99FCF 91FF1959
-        011D5798 B2FCBC1F 14FCC24E 441F4C8F
-        9B08D977 E9498560 E63E7FFA B3134EA7"
-    );
-    let result = compute_key(
-        shared_secret.as_ref(),
-        &KeyType::Encryption,
-        &EncryptionAlgorithm::AES128,
-    );
-    assert_eq!(&result?, &hex!("01AFC10C F87BE36D 8179E873 70171F07"));
-    let result = compute_key(
-        shared_secret.as_ref(),
-        &KeyType::Mac,
-        &EncryptionAlgorithm::AES128,
-    );
-    assert_eq!(&result?, &hex!("23F0FBD0 5FD6C7B8 B88F4C83 09669061"));
+        let result = other_mrz("L898902C3", "740812", "1204151");
+        assert!(result.is_err_and(|e| matches!(e, EmrtdError::ParseMrzFieldError("Expiry date", _))));
 
-    // Examples taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix I.1
-    let shared_secret =
-        hex!("67950559 D0C06B4D 4B86972D 14460837 461087F8 419FDBC3 6AAF6CEA AC462832");
-    let result = compute_key(
-        shared_secret.as_ref(),
-        &KeyType::Encryption,
-        &EncryptionAlgorithm::AES128,
-    );
-    assert_eq!(&result?, &hex!("0A9DA4DB 03BDDE39 FC5202BC 44B2E89E"));
-    let result = compute_key(
-        shared_secret.as_ref(),
-        &KeyType::Mac,
-        &EncryptionAlgorithm::AES128,
-    );
-    assert_eq!(&result?, &hex!("4B1C0649 1ED5140C A2B537D3 44C6C0B1"));
+        Ok(())
+    }
 
-    Ok(())
-}
+    #[test]
+    fn test_len2int_valid_input() -> Result<(), EmrtdError> {
+        let result = len2int(&hex!("2A"), 0);
+        assert_eq!(result?, (1, 42));
 
-#[test]
-fn test_compute_mac() -> Result<(), EmrtdError> {
-    use hex_literal::hex;
+        let result = len2int(&hex!("302A"), 1);
+        assert_eq!(result?, (2, 42));
 
-    // Examples taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix D.3
-    let data = hex!("72C29C2371CC9BDB65B779B8E8D37B29ECC154AA56A8799FAE2F498F76ED92F2");
-    let result = compute_mac(
-        &hex!("7962D9ECE03D1ACD4C76089DCE131543"),
-        &padding_method_2(data.as_ref(), 8)?,
-        &MacAlgorithm::DES,
-    );
-    assert_eq!(&result?, &hex!("5F1448EEA8AD90A7"));
+        let result = len2int(&hex!("308207E8"), 1);
+        assert_eq!(result?, (4, 2024));
 
-    let data = hex!("46B9342A41396CD7386BF5803104D7CEDC122B9132139BAF2EEDC94EE178534F");
-    let result = compute_mac(
-        &hex!("7962D9ECE03D1ACD4C76089DCE131543"),
-        &padding_method_2(data.as_ref(), 8)?,
-        &MacAlgorithm::DES,
-    );
-    assert_eq!(&result?, &hex!("2F2D235D074D7449"));
+        let result = len2int(&hex!("3030308207E8"), 3);
+        assert_eq!(result?, (6, 2024));
 
-    // Examples taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix D.4
-    let data = hex!("887022120C06C2270CA4020C800000008709016375432908C044F6");
-    let result = compute_mac(
-        &hex!("F1CB1F1FB5ADF208806B89DC579DC1F8"),
-        &padding_method_2(data.as_ref(), 8)?,
-        &MacAlgorithm::DES,
-    );
-    assert_eq!(&result?, &hex!("BF8B92D635FF24F8"));
+        let result = len2int(&hex!("3083010000"), 1);
+        assert_eq!(result?, (5, 0x0001_0000));
+        Ok(())
+    }
 
-    let data = hex!("887022120C06C22899029000");
-    let result = compute_mac(
-        &hex!("F1CB1F1FB5ADF208806B89DC579DC1F8"),
-        &padding_method_2(data.as_ref(), 8)?,
-        &MacAlgorithm::DES,
-    );
-    assert_eq!(&result?, &hex!("FA855A5D4C50A8ED"));
+    #[test]
+    fn test_len2int_invalid_input() -> Result<(), EmrtdError> {
+        let result = len2int(&hex!("30"), 1);
+        assert!(result.is_err_and(|e| matches!(e, EmrtdError::ParseAsn1DataError(2, 1))));
 
-    let data = hex!("887022120C06C2290CB0000080000000970104");
-    let result = compute_mac(
-        &hex!("F1CB1F1FB5ADF208806B89DC579DC1F8"),
-        &padding_method_2(data.as_ref(), 8)?,
-        &MacAlgorithm::DES,
-    );
-    assert_eq!(&result?, &hex!("ED6705417E96BA55"));
+        let result = len2int(&hex!("3082"), 1);
+        assert!(result.is_err_and(|e| matches!(e, EmrtdError::ParseAsn1DataError(4, 2))));
+        Ok(())
+    }
 
-    let data = hex!("887022120C06C22A8709019FF0EC34F992265199029000");
-    let result = compute_mac(
-        &hex!("F1CB1F1FB5ADF208806B89DC579DC1F8"),
-        &padding_method_2(data.as_ref(), 8)?,
-        &MacAlgorithm::DES,
-    );
-    assert_eq!(&result?, &hex!("AD55CC17140B2DED"));
+    #[test]
+    fn test_int2asn1len() {
+        let result = int2asn1len(0);
+        assert_eq!(result, hex!("00").to_vec());
 
-    let data = hex!("887022120C06C22B0CB0000480000000970112");
-    let result = compute_mac(
-        &hex!("F1CB1F1FB5ADF208806B89DC579DC1F8"),
-        &padding_method_2(data.as_ref(), 8)?,
-        &MacAlgorithm::DES,
-    );
-    assert_eq!(&result?, &hex!("2EA28A70F3C7B535"));
+        let result = int2asn1len(42);
+        assert_eq!(result, hex!("2A").to_vec());
 
-    let data =
-        hex!("887022120C06C22C871901FB9235F4E4037F2327DCC8964F1F9B8C30F42C8E2FFF224A99029000");
-    let result = compute_mac(
-        &hex!("F1CB1F1FB5ADF208806B89DC579DC1F8"),
-        &padding_method_2(data.as_ref(), 8)?,
-        &MacAlgorithm::DES,
-    );
-    assert_eq!(&result?, &hex!("C8B2787EAEA07D74"));
+        let result = int2asn1len(127);
+        assert_eq!(result, hex!("7F").to_vec());
 
-    Ok(())
-}
+        let result = int2asn1len(2024);
+        assert_eq!(result, hex!("8207E8").to_vec());
 
-#[cfg(feature = "passive_auth")]
-#[test]
-fn test_oid2digestalg_known_oid() -> Result<(), EmrtdError> {
-    let result = oid2digestalg(
-        &rasn::types::ObjectIdentifier::new(vec![2, 16, 840, 1, 101, 3, 4, 2, 1]).unwrap(),
-    )?;
-    assert!(result.eq(&MessageDigest::sha256()));
+        let result = int2asn1len(0x0001_0000);
+        assert_eq!(result, hex!("83010000").to_vec());
 
-    Ok(())
-}
+        let result = len2int(&int2asn1len(0x0001_0000), 0)
+            .expect("Value should be valid")
+            .1;
+        assert_eq!(result, 0x0001_0000);
 
-#[cfg(feature = "passive_auth")]
-#[test]
-fn test_oid2digestalg_unknown_oid() -> Result<(), EmrtdError> {
-    // ripemd256
-    let result =
-        oid2digestalg(&rasn::types::ObjectIdentifier::new(vec![1, 3, 36, 3, 2, 3]).unwrap());
+        let result = len2int(&int2asn1len(usize::MAX), 0)
+            .expect("Value should be valid")
+            .1;
+        assert_eq!(result, usize::MAX);
+    }
 
-    assert!(result.is_err_and(|e| matches!(e, EmrtdError::InvalidOidError())));
-    Ok(())
-}
+    #[test]
+    fn test_generate_key_seed_valid() -> Result<(), EmrtdError> {
+        // Example taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix D
+        let result = generate_key_seed(b"L898902C<369080619406236");
+        assert_eq!(&result?[..16], &hex!("239AB9CB282DAF66231DC5A4DF6BFBAE"));
 
-#[test]
-fn test_send() -> Result<(), EmrtdError> {
-    Ok(())
+        // Example taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix G
+        let result = generate_key_seed(b"T22000129364081251010318");
+        assert_eq!(
+            &result?,
+            &hex!("7E2D2A41 C74EA0B3 8CD36F86 3939BFA8 E9032AAD")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_compute_key_valid_input() -> Result<(), EmrtdError> {
+        // Example taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix D.1
+        let key_seed = hex!("239AB9CB282DAF66231DC5A4DF6BFBAE");
+        let result = compute_key(
+            key_seed.as_ref(),
+            &KeyType::Encryption,
+            &EncryptionAlgorithm::DES3,
+        );
+        assert_eq!(
+            &result?,
+            &hex!("AB94FDECF2674FDFB9B391F85D7F76F2AB94FDECF2674FDF")
+        );
+        let result = compute_key(key_seed.as_ref(), &KeyType::Mac, &EncryptionAlgorithm::DES3);
+        assert_eq!(&result?, &hex!("7962D9ECE03D1ACD4C76089DCE131543"));
+
+        // Example taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix G.1
+        let shared_secret =
+            hex!("28768D20 701247DA E81804C9 E780EDE5 82A9996D B4A31502 0B273319 7DB84925");
+        let result = compute_key(
+            shared_secret.as_ref(),
+            &KeyType::Encryption,
+            &EncryptionAlgorithm::AES128,
+        );
+        assert_eq!(&result?, &hex!("F5F0E35C 0D7161EE 6724EE51 3A0D9A7F"));
+        let result = compute_key(
+            shared_secret.as_ref(),
+            &KeyType::Mac,
+            &EncryptionAlgorithm::AES128,
+        );
+        assert_eq!(&result?, &hex!("FE251C78 58B356B2 4514B3BD 5F4297D1"));
+
+        // Example taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix G.2
+        let shared_secret = hex!(
+            "6BABC7B3 A72BCD7E A385E4C6 2DB2625B
+            D8613B24 149E146A 629311C4 CA6698E3
+            8B834B6A 9E9CD718 4BA8834A FF5043D4
+            36950C4C 1E783236 7C10CB8C 314D40E5
+            990B0DF7 013E64B4 549E2270 923D06F0
+            8CFF6BD3 E977DDE6 ABE4C31D 55C0FA2E
+            465E553E 77BDF75E 3193D383 4FC26E8E
+            B1EE2FA1 E4FC97C1 8C3F6CFF FE2607FD"
+        );
+        let result = compute_key(
+            shared_secret.as_ref(),
+            &KeyType::Encryption,
+            &EncryptionAlgorithm::AES128,
+        );
+        assert_eq!(&result?, &hex!("2F7F46AD CC9E7E52 1B45D192 FAFA9126"));
+        let result = compute_key(
+            shared_secret.as_ref(),
+            &KeyType::Mac,
+            &EncryptionAlgorithm::AES128,
+        );
+        assert_eq!(&result?, &hex!("805A1D27 D45A5116 F73C5446 9462B7D8"));
+
+        // Example taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix H.1
+        let shared_secret =
+            hex!("4F150FDE 1D4F0E38 E95017B8 91BAE171 33A0DF45 B0D3E18B 60BA7BEA FDC2C713");
+        let result = compute_key(
+            shared_secret.as_ref(),
+            &KeyType::Encryption,
+            &EncryptionAlgorithm::AES128,
+        );
+        assert_eq!(&result?, &hex!("0D3FEB33 251A6370 893D62AE 8DAAF51B"));
+        let result = compute_key(
+            shared_secret.as_ref(),
+            &KeyType::Mac,
+            &EncryptionAlgorithm::AES128,
+        );
+        assert_eq!(&result?, &hex!("B01E89E3 D9E8719E 586B50B4 A7506E0B"));
+
+        // Example taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix H.2
+        let shared_secret = hex!(
+            "419410D6 C0A17A4C 07C54872 CE1CBCEB
+            0A2705C1 A434C8A8 9A4CFE41 F1D78124
+            CA7EC52B DE7615E5 345E48AB 1ABB6E7D
+            1D59A57F 3174084D 3CA45703 97C1F622
+            28BDFDB2 DA191EA2 239E2C06 0DBE3BBC
+            23C2FCD0 AF12E0F9 E0B99FCF 91FF1959
+            011D5798 B2FCBC1F 14FCC24E 441F4C8F
+            9B08D977 E9498560 E63E7FFA B3134EA7"
+        );
+        let result = compute_key(
+            shared_secret.as_ref(),
+            &KeyType::Encryption,
+            &EncryptionAlgorithm::AES128,
+        );
+        assert_eq!(&result?, &hex!("01AFC10C F87BE36D 8179E873 70171F07"));
+        let result = compute_key(
+            shared_secret.as_ref(),
+            &KeyType::Mac,
+            &EncryptionAlgorithm::AES128,
+        );
+        assert_eq!(&result?, &hex!("23F0FBD0 5FD6C7B8 B88F4C83 09669061"));
+
+        // Examples taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix I.1
+        let shared_secret =
+            hex!("67950559 D0C06B4D 4B86972D 14460837 461087F8 419FDBC3 6AAF6CEA AC462832");
+        let result = compute_key(
+            shared_secret.as_ref(),
+            &KeyType::Encryption,
+            &EncryptionAlgorithm::AES128,
+        );
+        assert_eq!(&result?, &hex!("0A9DA4DB 03BDDE39 FC5202BC 44B2E89E"));
+        let result = compute_key(
+            shared_secret.as_ref(),
+            &KeyType::Mac,
+            &EncryptionAlgorithm::AES128,
+        );
+        assert_eq!(&result?, &hex!("4B1C0649 1ED5140C A2B537D3 44C6C0B1"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_compute_mac() -> Result<(), EmrtdError> {
+        // Examples taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix D.3
+        let data = hex!("72C29C2371CC9BDB65B779B8E8D37B29ECC154AA56A8799FAE2F498F76ED92F2");
+        let result = compute_mac(
+            &hex!("7962D9ECE03D1ACD4C76089DCE131543"),
+            &padding_method_2(data.as_ref(), 8)?,
+            &MacAlgorithm::DES,
+        );
+        assert_eq!(&result?, &hex!("5F1448EEA8AD90A7"));
+
+        let data = hex!("46B9342A41396CD7386BF5803104D7CEDC122B9132139BAF2EEDC94EE178534F");
+        let result = compute_mac(
+            &hex!("7962D9ECE03D1ACD4C76089DCE131543"),
+            &padding_method_2(data.as_ref(), 8)?,
+            &MacAlgorithm::DES,
+        );
+        assert_eq!(&result?, &hex!("2F2D235D074D7449"));
+
+        // Examples taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix D.4
+        let data = hex!("887022120C06C2270CA4020C800000008709016375432908C044F6");
+        let result = compute_mac(
+            &hex!("F1CB1F1FB5ADF208806B89DC579DC1F8"),
+            &padding_method_2(data.as_ref(), 8)?,
+            &MacAlgorithm::DES,
+        );
+        assert_eq!(&result?, &hex!("BF8B92D635FF24F8"));
+
+        let data = hex!("887022120C06C22899029000");
+        let result = compute_mac(
+            &hex!("F1CB1F1FB5ADF208806B89DC579DC1F8"),
+            &padding_method_2(data.as_ref(), 8)?,
+            &MacAlgorithm::DES,
+        );
+        assert_eq!(&result?, &hex!("FA855A5D4C50A8ED"));
+
+        let data = hex!("887022120C06C2290CB0000080000000970104");
+        let result = compute_mac(
+            &hex!("F1CB1F1FB5ADF208806B89DC579DC1F8"),
+            &padding_method_2(data.as_ref(), 8)?,
+            &MacAlgorithm::DES,
+        );
+        assert_eq!(&result?, &hex!("ED6705417E96BA55"));
+
+        let data = hex!("887022120C06C22A8709019FF0EC34F992265199029000");
+        let result = compute_mac(
+            &hex!("F1CB1F1FB5ADF208806B89DC579DC1F8"),
+            &padding_method_2(data.as_ref(), 8)?,
+            &MacAlgorithm::DES,
+        );
+        assert_eq!(&result?, &hex!("AD55CC17140B2DED"));
+
+        let data = hex!("887022120C06C22B0CB0000480000000970112");
+        let result = compute_mac(
+            &hex!("F1CB1F1FB5ADF208806B89DC579DC1F8"),
+            &padding_method_2(data.as_ref(), 8)?,
+            &MacAlgorithm::DES,
+        );
+        assert_eq!(&result?, &hex!("2EA28A70F3C7B535"));
+
+        let data =
+            hex!("887022120C06C22C871901FB9235F4E4037F2327DCC8964F1F9B8C30F42C8E2FFF224A99029000");
+        let result = compute_mac(
+            &hex!("F1CB1F1FB5ADF208806B89DC579DC1F8"),
+            &padding_method_2(data.as_ref(), 8)?,
+            &MacAlgorithm::DES,
+        );
+        assert_eq!(&result?, &hex!("C8B2787EAEA07D74"));
+
+        Ok(())
+    }
+
+    #[cfg(feature = "passive_auth")]
+    #[test]
+    fn test_oid2digestalg_known_oid() -> Result<(), EmrtdError> {
+        let result = oid2digestalg(
+            &rasn::types::ObjectIdentifier::new(vec![2, 16, 840, 1, 101, 3, 4, 2, 1]).unwrap(),
+        )?;
+        assert!(result.eq(&MessageDigest::sha256()));
+
+        Ok(())
+    }
+
+    #[cfg(feature = "passive_auth")]
+    #[test]
+    fn test_oid2digestalg_unknown_oid() -> Result<(), EmrtdError> {
+        // ripemd256
+        let result =
+            oid2digestalg(&rasn::types::ObjectIdentifier::new(vec![1, 3, 36, 3, 2, 3]).unwrap());
+
+        assert!(result.is_err_and(|e| matches!(e, EmrtdError::InvalidOidError())));
+        Ok(())
+    }
+
+    #[test]
+    fn test_send() -> Result<(), EmrtdError> {
+        use hex_literal::hex;
+
+        let mock_card = MockCard {};
+        let mock_crypto_rng = MockCryptoRng::new(vec![]);
+        let mut sm_object = EmrtdComms::<MockCard, MockCryptoRng>::new(mock_card, mock_crypto_rng);
+        let result = sm_object.get_atr()?;
+        assert_eq!(&result, &hex!("0001020304050607"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_bac_secure_messaging() -> Result<(), EmrtdError> {
+        use hex_literal::hex;
+
+        let mock_card = MockCard {};
+        // Examples taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix D.3 & D.4
+        let mock_crypto_rng = MockCryptoRng::new(
+            hex!("781723860C06C226 0B795240CB7049B01C19B33E32804F0B").to_vec());
+        let mut sm_object = EmrtdComms::<MockCard, MockCryptoRng>::new(mock_card, mock_crypto_rng);
+        let result = sm_object.get_atr()?;
+        assert_eq!(&result, &hex!("0001020304050607"));
+
+        sm_object.select_emrtd_application()?;
+
+        sm_object.establish_bac_session_keys(b"L898902C<369080619406236")?;
+
+        // ks_enc is a DES key in case of BAC and the third BAC key is empty (repeats the first key)
+        assert_eq!(*sm_object.ks_enc.as_ref().unwrap(), hex!("979EC13B1CBFE9DCD01AB0FED307EAE5 979EC13B1CBFE9DC"));
+        assert_eq!(*sm_object.ks_mac.as_ref().unwrap(), hex!("F1CB1F1FB5ADF208806B89DC579DC1F8"));
+        assert_eq!(*sm_object.ssc.as_ref().unwrap(), hex!("887022120C06C226"));
+
+        sm_object.select_ef(&hex!("011E"), "EF.COM", true)?;
+
+        let ef_com = sm_object.read_data_from_ef(true)?;
+
+        assert_eq!(ef_com, hex!("60145F0104303130365F36063034303030305C026175"));
+
+        Ok(())
+    }
 }
