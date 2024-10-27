@@ -16,10 +16,11 @@ pcsc = "2.8.2"
 cipher = { version = "0.4.4", features = ["block-padding", "alloc"] }
 des = "0.8.1"
 aes = "0.8.4"
-ecb = "0.1.2"
 cbc = "0.1.2"
 tracing = "0.1.40"
 tracing-subscriber = "0.3.18"
+digest = "0.10.7"
+md-5 = "0.10.6"
 sha1-checked = "0.10.0"
 sha2 = "0.10.8"
 constant_time_eq = "0.3.1"
@@ -29,9 +30,9 @@ openssl = { version = "0.10.66", features = ["vendored"], optional = true }
 rasn = { version = "0.16.6", optional = true}
 rasn-cms = { version = "0.16.6", optional = true}
 rasn-pkix = { version = "0.16.6", optional = true}
-
-[dev-dependencies]
+num-bigint = "0.4.6"
 hex-literal = "0.4.1"
 
 [features]
+default = ["passive_auth"]
 passive_auth = ["dep:openssl", "dep:rasn", "dep:rasn-cms", "dep:rasn-pkix"]
