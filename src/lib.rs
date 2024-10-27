@@ -119,7 +119,7 @@
 //!         let master_list = include_bytes!("../data/DE_ML_2024-04-10-10-54-13.ml");
 //!         let csca_cert_store = parse_master_list(master_list)?;
 //!         result = passive_authentication(&ef_sod, &csca_cert_store).unwrap();
-//!         info!("{:?} {:?} {:?}", result.0.type_(), result.1, result.2);
+//!         info!("{:?} {:?}", result.1, result.2);
 //!     }
 //!
 //!     // Read EF.DG1
@@ -127,14 +127,14 @@
 //!     let ef_dg1 = sm_object.read_data_from_ef(true)?;
 //!     info!("Data from the EF.DG1: {}", bytes2hex(&ef_dg1));
 //!     #[cfg(feature = "passive_auth")]
-//!     validate_dg(&ef_dg1, 1, result.0, &result.1)?;
+//!     validate_dg(&ef_dg1, 1, result.0.clone(), &result.1)?;
 //!
 //!     // Read EF.DG2
 //!     sm_object.select_ef(b"\x01\x02", "EF.DG2", true)?;
 //!     let ef_dg2 = sm_object.read_data_from_ef(true)?;
 //!     info!("Data from the EF.DG2: {}", bytes2hex(&ef_dg2));
 //!     #[cfg(feature = "passive_auth")]
-//!     validate_dg(&ef_dg2, 2, result.0, &result.1)?;
+//!     validate_dg(&ef_dg2, 2, result.0.clone(), &result.1)?;
 //!
 //!     let jpeg = get_jpeg_from_ef_dg2(&ef_dg2)?;
 //!     std::fs::write("face.jpg", jpeg).expect("Error writing file");
@@ -153,31 +153,27 @@ use core::{
     fmt::{self, Debug, Write},
     iter, mem,
 };
+use std::str::Utf8Error;
 #[cfg(feature = "passive_auth")]
 use digest::DynDigest;
 #[cfg(feature = "passive_auth")]
-use openssl::{
-    hash::MessageDigest,
-    sign::Verifier,
-    stack::Stack,
-    x509::{
+use openssl::x509::{
+        X509,
         store::{X509Store, X509StoreBuilder},
-        X509StoreContext, X509,
-    },
-};
+    };
 use pcsc::Attribute::AtrString;
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 #[cfg(feature = "passive_auth")]
 use rasn::{der, types::Oid};
 #[cfg(feature = "passive_auth")]
-use rasn_cms::{CertificateChoices, RevocationInfoChoice};
+use rasn_cms::{CertificateChoices, RevocationInfoChoice, Name, Signature};
+#[cfg(feature = "passive_auth")]
+use rasn_pkix::{Certificate, X520CountryName, X520SerialNumber, X520CommonName, DirectoryString, Validity};
 #[cfg(feature = "passive_auth")]
 use sha1_checked::Sha1;
 #[cfg(feature = "passive_auth")]
 use sha2::{Digest, Sha256};
-#[cfg(feature = "passive_auth")]
-use tracing::warn;
-use tracing::{error, info, trace};
+use tracing::{error, info, trace, warn};
 
 #[derive(Debug)]
 #[non_exhaustive]
@@ -207,7 +203,10 @@ pub enum EmrtdError {
     RasnDecodeError(rasn::error::DecodeError),
     PadError(cipher::inout::PadError),
     UnpadError(cipher::block_padding::UnpadError),
-    IntCastError(std::num::TryFromIntError),
+    IntCastError(core::num::TryFromIntError),
+    DSCError(&'static str),
+    InvalidCountryName(&'static str),
+    Utf8Error(Utf8Error),
 }
 impl fmt::Display for EmrtdError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -265,6 +264,13 @@ impl fmt::Display for EmrtdError {
             Self::PadError(ref e) => fmt::Display::fmt(&e, f),
             Self::UnpadError(ref e) => fmt::Display::fmt(&e, f),
             Self::IntCastError(ref e) => fmt::Display::fmt(&e, f),
+            Self::DSCError(error_msg) => {
+                write!(f, "Failure during DSC (Document Signer Certificate) parsing: {error_msg}")
+            },
+            Self::InvalidCountryName(error_msg) => {
+                write!(f, "Country name is invalid: {error_msg}")
+            },
+            Self::Utf8Error(ref e) => fmt::Display::fmt(&e, f),
         }
     }
 }
@@ -1042,16 +1048,10 @@ fn compute_mac(key: &[u8], data: &[u8], alg: &MacAlgorithm) -> Result<Vec<u8>, E
             let mut h = encrypt_ecb::<des::Des>(key1, &data[..8])?;
 
             for i in 1..(data.len() / 8) {
-                h = encrypt_ecb::<des::Des>(
-                    key1,
-                    &xor_slices(&h, &data[8 * i..8 * (i + 1)])?,
-                )?;
+                h = encrypt_ecb::<des::Des>(key1, &xor_slices(&h, &data[8 * i..8 * (i + 1)])?)?;
             }
 
-            let mac_x = encrypt_ecb::<des::Des>(
-                key1,
-                &decrypt_ecb::<des::Des>(key2, &h)?,
-            )?;
+            let mac_x = encrypt_ecb::<des::Des>(key1, &decrypt_ecb::<des::Des>(key2, &h)?)?;
 
             Ok(mac_x)
         }
@@ -1456,107 +1456,101 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
     let master_list_signer = {
         let mut possible_master_list_signer = None;
         let mut possible_csca_cert = None;
-        for cert in signed_data.certificates.iter().flatten() {
-            if let CertificateChoices::Certificate(c) = cert {
-                match &c.tbs_certificate.extensions {
-                    Some(exts) => {
-                        if exts.is_empty() {
-                            error!("Certificate Extensions must exist certificates in Master List");
-                            return Err(EmrtdError::InvalidFileStructure(
-                                "Certificate Extensions must exist certificates in Master List",
-                            ));
-                        }
-                        if possible_master_list_signer.is_none() {
-                            for ext in exts.iter() {
-                                // It is mandatory by ICAO Doc 9303-12 Section 7.1.1.3
-                                // <https://www.icao.int/publications/Documents/9303_p12_cons_en.pdf>
-                                //
-                                // > The Object Identifier (OID) that must be included in the extendedKeyUsage
-                                // extension for Master List Signer certificates is 2.23.136.1.1.3.
-                                if ext.extn_id.eq(Oid::const_new(&[2, 5, 29, 37]))
-                                    && ext.extn_value.len() == 10
-                                    && constant_time_eq(
-                                        &ext.extn_value,
-                                        b"\x30\x08\x06\x06\x67\x81\x08\x01\x01\x03",
-                                    )
-                                {
-                                    let master_list_signer_bytes =
-                                        der::encode(&c).map_err(EmrtdError::RasnEncodeError)?;
-                                    let master_list_signer =
-                                        X509::from_der(&master_list_signer_bytes)
-                                            .map_err(EmrtdError::OpensslErrorStack)?;
-                                    possible_master_list_signer = Some(master_list_signer);
-                                    break;
-                                // It is mandatory by ICAO Doc 9303-12 Table 6
-                                // <https://www.icao.int/publications/Documents/9303_p12_cons_en.pdf>
-                                //
-                                // > Basic constraints cA is mandatory for CSCA certificates
-                                // > PathLenConstraint must always be '0'
-                                } else if ext.extn_id.eq(Oid::const_new(&[2, 5, 29, 19]))
-                                    && ext.extn_value.len() == 8
-                                    && constant_time_eq(
-                                        &ext.extn_value,
-                                        b"\x30\x06\x01\x01\xFF\x02\x01\x00",
-                                    )
-                                {
-                                    let csca_cert_bytes =
-                                        der::encode(&c).map_err(EmrtdError::RasnEncodeError)?;
-                                    let csca_cert = X509::from_der(&csca_cert_bytes)
-                                        .map_err(EmrtdError::OpensslErrorStack)?;
-                                    possible_csca_cert = Some(csca_cert);
-                                    break;
-                                }
+
+        for certificate in signed_data.certificates.iter().flatten() {
+            match certificate {
+                CertificateChoices::Certificate(certificate) => {
+                    let cert = *(certificate.clone());
+                    check_certificate_common_values(&cert)?;
+
+                    for exts in cert.tbs_certificate.extensions.iter() {
+                        for ext in exts.iter() {
+                            // It is mandatory by ICAO Doc 9303-12 Section 7.1.1.3
+                            // <https://www.icao.int/publications/Documents/9303_p12_cons_en.pdf>
+                            //
+                            // > The Object Identifier (OID) that must be included in the extendedKeyUsage
+                            // extension for Master List Signer certificates is 2.23.136.1.1.3.
+                            if ext.extn_id.eq(Oid::const_new(&[2, 5, 29, 37]))
+                                && ext.extn_value.len() == 10
+                                && constant_time_eq(
+                                    &ext.extn_value,
+                                    b"\x30\x08\x06\x06\x67\x81\x08\x01\x01\x03",
+                                )
+                            {
+                                possible_master_list_signer = Some(cert.clone());
+                                break;
+                            // It is mandatory by ICAO Doc 9303-12 Table 6
+                            // <https://www.icao.int/publications/Documents/9303_p12_cons_en.pdf>
+                            //
+                            // > Basic constraints cA is mandatory for CSCA certificates
+                            // > PathLenConstraint must always be '0'
+                            } else if ext.extn_id.eq(Oid::const_new(&[2, 5, 29, 19]))
+                                && ext.extn_value.len() == 8
+                                && constant_time_eq(
+                                    &ext.extn_value,
+                                    b"\x30\x06\x01\x01\xFF\x02\x01\x00",
+                                )
+                            {
+                                possible_csca_cert = Some(cert.clone());
+                                break;
                             }
                         }
                     }
-                    None => {
-                        error!("Certificate Extensions must exist certificates in Master List");
-                        return Err(EmrtdError::InvalidFileStructure(
-                            "Certificate Extensions must exist certificates in Master List",
-                        ));
-                    }
                 }
+                CertificateChoices::ExtendedCertificate(_) => unimplemented!("Master Lists that use a ExtendedCertificate (obsolete) as a Master List Signer Certificate are not supported"),
+                CertificateChoices::V2AttributeCertificate(_) => unimplemented!("Master Lists that use a V2AttributeCertificate certificate as a Master List Signer Certificate are not supported"),
+                CertificateChoices::Other(_) => unimplemented!("Master Lists that use unknown certificate as a Master List Signer Certificate are not supported"),
             }
         }
+
         // Make sure we got a possible certificate
         match possible_master_list_signer {
-            Some(c) => {
+            Some(master_list_signer_cert) => {
                 // And verify that the Master List Signer was issued by CSCA certificate if it exists
                 match possible_csca_cert {
                     Some(csca_cert) => {
-                        let chain = Stack::new().map_err(EmrtdError::OpensslErrorStack)?;
-                        let mut store_bldr =
-                            X509StoreBuilder::new().map_err(EmrtdError::OpensslErrorStack)?;
-                        store_bldr
-                            .add_cert(csca_cert)
-                            .map_err(EmrtdError::OpensslErrorStack)?;
-                        let store = store_bldr.build();
-
-                        let mut context =
-                            X509StoreContext::new().map_err(EmrtdError::OpensslErrorStack)?;
-                        let master_list_verification = context
-                            .init(&store, &c, &chain, |c| {
-                                let verification = c.verify_cert()?;
-                                if verification {
-                                    Ok((verification, ""))
-                                } else {
-                                    Ok((verification, c.error().error_string()))
-                                }
-                            })
-                            .map_err(EmrtdError::OpensslErrorStack)?;
-                        if !master_list_verification.0 {
-                            warn!("Error while verifying Master List Signer Certificate signature: {}", master_list_verification.1);
+                        let csca_cert_signature = der::encode(&csca_cert.signature_value).map_err(EmrtdError::RasnEncodeError)?;
+                        match verify_signature(&csca_cert, todo!(), &csca_cert_signature) {
+                            Ok(_) => info!("Self signed CSCA Certificate signature is valid"),
+                            Err(_) => warn!("Self signed CSCA Certificate signature is invalid"),
                         }
-                        info!(
-                            "Master List Signer Certificate signature verification result: {}",
-                            master_list_verification.0
-                        );
+                        let master_list_signer_cert_signature = der::encode(&master_list_signer_cert.signature_value).map_err(EmrtdError::RasnEncodeError)?;
+                        match verify_signature(&csca_cert, todo!(), &master_list_signer_cert_signature) {
+                            Ok(_) => info!("Master List Signer Certificate signature is valid"),
+                            Err(_) => warn!("Master List Signer Certificate signature is invalid"),
+                        }
+
+                        // let chain = Stack::new().map_err(EmrtdError::OpensslErrorStack)?;
+                        // let mut store_bldr =
+                        //     X509StoreBuilder::new().map_err(EmrtdError::OpensslErrorStack)?;
+                        // store_bldr
+                        //     .add_cert(csca_cert)
+                        //     .map_err(EmrtdError::OpensslErrorStack)?;
+                        // let store = store_bldr.build();
+
+                        // let mut context =
+                        //     X509StoreContext::new().map_err(EmrtdError::OpensslErrorStack)?;
+                        // let master_list_verification = context
+                        //     .init(&store, &c, &chain, |c| {
+                        //         let verification = c.verify_cert()?;
+                        //         if verification {
+                        //             Ok((verification, ""))
+                        //         } else {
+                        //             Ok((verification, c.error().error_string()))
+                        //         }
+                        //     })
+                        //     .map_err(EmrtdError::OpensslErrorStack)?;
+                        // if !master_list_verification.0 {
+                        //     warn!("Error while verifying Master List Signer Certificate signature: {}", master_list_verification.1);
+                        // }
+                        // info!(
+                        //     "Master List Signer Certificate signature verification result: {}",
+                        //     master_list_verification.0
+                        // );
                     }
-                    None => {
-                        warn!("Master List Signer Certificate signature is not verified, no CSCA certificate found in signed_data.certificates");
-                    }
+                    None => warn!("Master List Signer Certificate signature is not verified, no CSCA certificate found in signed_data.certificates")
                 }
-                c
+                master_list_signer_cert
             }
             None => unimplemented!("Master List must include a Master List Signer"),
         }
@@ -1798,26 +1792,27 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
     // Follows RFC 5652 Section 5.6 Signature Verification Process
     // <https://datatracker.ietf.org/doc/html/rfc5652#section-5.6>
     let _signature_algorithm = &signer_info.signature_algorithm;
-    let signature = &signer_info.signature;
+    let signature = der::encode(&signer_info.signature).map_err(EmrtdError::RasnEncodeError)?;
     info!("{:?}", master_list_signer);
-    let pub_key = master_list_signer
-        .public_key()
-        .map_err(EmrtdError::OpensslErrorStack)?;
-    let mut verifier =
-        Verifier::new(digest_algorithm, &pub_key).map_err(EmrtdError::OpensslErrorStack)?;
-    verifier
-        .update(&signed_attrs_bytes)
-        .map_err(EmrtdError::OpensslErrorStack)?;
-    let sig_verified = verifier
-        .verify(signature)
-        .map_err(EmrtdError::OpensslErrorStack)?;
-    info!("Signature verification: {sig_verified}");
+    // let pub_key = master_list_signer
+    //     .public_key()
+    //     .map_err(EmrtdError::OpensslErrorStack)?;
+    // let mut verifier =
+    //     Verifier::new(digest_algorithm, &pub_key).map_err(EmrtdError::OpensslErrorStack)?;
+    // verifier
+    //     .update(&signed_attrs_bytes)
+    //     .map_err(EmrtdError::OpensslErrorStack)?;
+    // let sig_verified = verifier
+    //     .verify(signature)
+    //     .map_err(EmrtdError::OpensslErrorStack)?;
 
-    if !sig_verified {
-        error!("Signature verification failure during Master List parsing");
-        return Err(EmrtdError::VerifySignatureError(
-            "Signature verification failure during Master List parsing",
-        ));
+    let signed_attrs_bytes_hash = use_digestalg(&mut *digest_algorithm, &signed_attrs_bytes);
+    match verify_signature(&master_list_signer, &signed_attrs_bytes_hash, &signature) {
+        Ok(_) => info!("Master List signature verification successful"),
+        Err(_) => {
+            error!("Signature verification failure during Master List parsing!");
+
+        },
     }
 
     // Parse the eContent
@@ -1849,6 +1844,171 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
     let store = store_bldr.build();
 
     Ok(store)
+}
+
+#[cfg(feature = "passive_auth")]
+fn check_country_name(country_name: &X520CountryName) -> Result<(), EmrtdError> {
+    // Check https://www.iso.org/iso-3166-country-codes.html
+    if !country_name.as_bytes().is_ascii() {
+        error!("CountryName must consist of ascii characters");
+        return Err(EmrtdError::InvalidCountryName("CountryName must consist of ascii characters"));
+    }
+    let country_name = std::str::from_utf8(country_name.as_bytes()).map_err(EmrtdError::Utf8Error)?;
+    if country_name.len() != 2 {
+        error!("CountryName must consist of 2 characters");
+        return Err(EmrtdError::InvalidCountryName("CountryName must consist of 2 characters"));
+    }
+    if !country_name.to_ascii_uppercase().eq(country_name) {
+        error!("CountryName must consist of uppercase characters");
+        return Err(EmrtdError::InvalidCountryName("CountryName must consist of uppercase characters"));
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "passive_auth")]
+fn check_issuer_subject(issuer_or_subject: &Name) -> Result<(), EmrtdError> {
+    // ICAO Doc 9303-12 Section 7
+    // <https://www.icao.int/publications/Documents/9303_p12_cons_en.pdf>
+    // > countryName and serialNumber, if present, MUST be PrintableString
+    // > Other attributes that have DirectoryString syntax MUST be either PrintableString or UTF8String
+    // > countryName MUST be Upper Case
+    let rasn_cms::Name::RdnSequence(issuer) = issuer_or_subject;
+    // ICAO Doc 9303-12 Section 7.1.1.1.1
+    // <https://www.icao.int/publications/Documents/9303_p12_cons_en.pdf>
+    // > countryName. MUST be present.
+    let mut country_name_present = false;
+    // ICAO Doc 9303-12 Section 7.1.1.1.1
+    // <https://www.icao.int/publications/Documents/9303_p12_cons_en.pdf>
+    // > commonName. MUST be present.
+    let mut common_name_present = false;
+    for dn in issuer {
+        for i in dn.iter() {
+            // ICAO Doc 9303-12 Section 7
+            // <https://www.icao.int/publications/Documents/9303_p12_cons_en.pdf>
+            // > countryName and serialNumber, if present, MUST be PrintableString
+            //
+            // id-at-countryName    AttributeType ::= { id-at 6 }
+            // RFC 5280 Appendix A.1
+            // <https://datatracker.ietf.org/doc/html/rfc5280>
+            if Oid::const_new(&[2, 5, 4, 6]).eq(&i.r#type) {
+                let country_name = der::decode::<X520CountryName>(i.value.as_bytes()).map_err(EmrtdError::RasnDecodeError)?;
+                check_country_name(&country_name)?;
+                country_name_present = true;
+            }
+            // id-at-commonName    AttributeType ::= { id-at 3 }
+            // RFC 5280 Appendix A.1
+            // <https://datatracker.ietf.org/doc/html/rfc5280>
+            else if Oid::const_new(&[2, 5, 4, 3]).eq(&i.r#type) {
+                let common_name = der::decode::<X520CommonName>(i.value.as_bytes()).map_err(EmrtdError::RasnDecodeError)?;
+                common_name_present = true;
+            }
+            // ICAO Doc 9303-12 Section 7
+            // <https://www.icao.int/publications/Documents/9303_p12_cons_en.pdf>
+            // > countryName and serialNumber, if present, MUST be PrintableString
+            //
+            // id-at-serialNumber    AttributeType ::= { id-at 5 }
+            // RFC 5280 Appendix A.1
+            // <https://datatracker.ietf.org/doc/html/rfc5280>
+            else if Oid::const_new(&[2, 5, 4, 5]).eq(&i.r#type) {
+                let serial_number = der::decode::<X520SerialNumber>(i.value.as_bytes()).map_err(EmrtdError::RasnDecodeError)?;
+            }
+            // ICAO Doc 9303-12 Section 7
+            // <https://www.icao.int/publications/Documents/9303_p12_cons_en.pdf>
+            // > Other attributes that have DirectoryString syntax MUST be either PrintableString or UTF8String
+            else {
+                let value = der::decode::<DirectoryString>(i.value.as_bytes()).map_err(EmrtdError::RasnDecodeError)?;
+                match value {
+                    DirectoryString::Printable(_) => (),
+                    DirectoryString::Utf8(_) => (),
+                    _ => {
+                        error!("TBSCertificate Issuer is invalid. Attributes that have DirectoryString syntax MUST be either PrintableString or UTF8String");
+                        return Err(EmrtdError::DSCError("TBSCertificate Issuer is invalid. Attributes that have DirectoryString syntax MUST be either PrintableString or UTF8String"))
+                    },
+                }
+            }
+        }
+    }
+    if !common_name_present {
+        error!("TBSCertificate Issuer must have commonName");
+        return Err(EmrtdError::DSCError("TBSCertificate Issuer must have commonName"))
+    }
+    if !country_name_present {
+        error!("TBSCertificate Issuer must have countryName");
+        return Err(EmrtdError::DSCError("TBSCertificate Issuer must have countryName"))
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "passive_auth")]
+fn check_validity(validity: &Validity) -> Result<(), EmrtdError> {
+    // ICAO Doc 9303-12 Section 7
+    // <https://www.icao.int/publications/Documents/9303_p12_cons_en.pdf>
+    // > MUST terminate with Zulu (Z)
+    // > Seconds element MUST be present
+    match validity.not_before {
+        // ICAO Doc 9303-12 Section 7
+        // <https://www.icao.int/publications/Documents/9303_p12_cons_en.pdf>
+        // > Dates through 2049 MUST be in UTCTime UTCTime MUST be represented as YYMMDDHHMMSSZ
+        rasn_pkix::Time::Utc(date_time) => {
+            todo!()
+        },
+        // ICAO Doc 9303-12 Section 7
+        // <https://www.icao.int/publications/Documents/9303_p12_cons_en.pdf>
+        // > Dates in 2050 and beyond MUST be in GeneralizedTime. GeneralizedTime MUST NOT have fractional seconds
+        // > GeneralizedTime MUST be represented as YYYYMMDDHHMMSSZ
+        rasn_pkix::Time::General(date_time) => {
+            todo!()
+        },
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "passive_auth")]
+fn check_certificate_common_values(cert: &Certificate) -> Result<(), EmrtdError> {
+    // ICAO Doc 9303-12 Section 7
+    // <https://www.icao.int/publications/Documents/9303_p12_cons_en.pdf>
+    // > MUST be v3
+    if cert.tbs_certificate.version.ne(&rasn_pkix::Version::V3) {
+        error!("DSC TBSCertificate version must be v3");
+        return Err(EmrtdError::DSCError("DSC TBSCertificate version must be v3"));
+    }
+    // ICAO Doc 9303-12 Section 7
+    // <https://www.icao.int/publications/Documents/9303_p12_cons_en.pdf>
+    // > MUST be positive integer and maximum 20 Octets
+    if cert.tbs_certificate.serial_number.sign().ne(&num_bigint::Sign::Plus) {
+        error!("DSC TBSCertificate serial number must be positive");
+        return Err(EmrtdError::DSCError("DSC TBSCertificate serial number must be positive"));
+    }
+    // ICAO Doc 9303-12 Section 7
+    // <https://www.icao.int/publications/Documents/9303_p12_cons_en.pdf>
+    // > MUST be positive integer and maximum 20 Octets
+    if cert.tbs_certificate.serial_number.to_bytes_be().1.len() > 20 {
+        error!("DSC TBSCertificate serial number octet length must not be greater than 20");
+        return Err(EmrtdError::DSCError("DSC TBSCertificate serial number octet length must not be greater than 20"));
+    }
+    // ICAO Doc 9303-12 Section 7
+    // <https://www.icao.int/publications/Documents/9303_p12_cons_en.pdf>
+    // > Value inserted here MUST be the same as that in signatureAlgorithm component of Certificate sequence
+    if cert.tbs_certificate.signature != cert.signature_algorithm {
+        error!("DSC TBSCertificate signature value must be the same as Certificate signatureAlgorithm");
+        return Err(EmrtdError::DSCError("DSC TBSCertificate signature value must be the same as Certificate signatureAlgorithm"));
+    }
+
+    check_issuer_subject(&cert.tbs_certificate.issuer)?;
+
+    check_validity(&cert.tbs_certificate.validity)?;
+
+    Ok(())
+}
+
+fn verify_signature(issuer: &Certificate, hashed_data: &[u8], signature: &[u8]) -> Result<(), EmrtdError> {
+
+    todo!();
+
+    Ok(())
 }
 
 /// Perform passive authentication on the EF.SOD (Security Object Data) of an eMRTD (electronic Machine Readable Travel Document).
@@ -1894,7 +2054,6 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
 /// match passive_authentication(ef_sod_data, &store) {
 ///     Ok((digest_algorithm, dg_hashes, dsc)) => {
 ///         info!("Passive authentication successful!");
-///         info!("Message Digest Algorithm (openssl NID): {:?}", digest_algorithm.type_());
 ///         info!("Data Group Hashes: {:?}", dg_hashes);
 ///         info!("Document Signer Certificate: {:?}", dsc);
 ///     }
@@ -1913,7 +2072,14 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
 pub fn passive_authentication(
     ef_sod: &[u8],
     cert_store: &X509Store,
-) -> Result<(Box<dyn DynDigest>, Vec<lds_security_object::DataGroupHash>, X509), EmrtdError> {
+) -> Result<
+    (
+        Box<dyn DynDigest>,
+        Vec<lds_security_object::DataGroupHash>,
+        Certificate,
+    ),
+    EmrtdError,
+> {
     // ICAO Doc 9303-10 Section 4.6.2
     // <https://www.icao.int/publications/Documents/9303_p10_cons_en.pdf>
     // Strip Document Security Object Tag 0x77
@@ -2028,36 +2194,22 @@ pub fn passive_authentication(
     //
     // But it is optional for LDS v0 ICAO Doc 9303-10 Appendix D.1
     let dsc = {
-        let mut possible_dsc = None;
-        for cert in signed_data.certificates.iter().flatten() {
-            if let CertificateChoices::Certificate(c) = cert {
-                let dsc_bytes = der::encode(&c).map_err(EmrtdError::RasnEncodeError)?;
-                let dsc = X509::from_der(&dsc_bytes).map_err(EmrtdError::OpensslErrorStack)?;
-                possible_dsc = Some(dsc);
-                break;
-            }
-        }
-        // Make sure we got a possible certificate
-        match possible_dsc {
-            Some(c) => {
-                let chain = Stack::new().map_err(EmrtdError::OpensslErrorStack)?;
-                let mut context = X509StoreContext::new().map_err(EmrtdError::OpensslErrorStack)?;
-                let dsc_verification = context.init(cert_store, &c, &chain, |c| {
-                    let verification = c.verify_cert()?;
-                    if verification {
-                        Ok((verification, ""))
-                    } else {
-                        Ok((verification, c.error().error_string()))
-                    }
-                }).map_err(EmrtdError::OpensslErrorStack)?;
-                if !dsc_verification.0 {
-                    error!("Error while verifying Document Signer Certificate signature: {}", dsc_verification.1);
-                    return Err(EmrtdError::InvalidFileStructure("DSC certificate verification using CSCA store failed"));
+        match &signed_data.certificates {
+            Some(certs) => {
+                match certs.first() {
+                    Some(CertificateChoices::Certificate(certificate)) => {
+                        let cert = *(certificate.clone());
+                        check_certificate_common_values(&cert)?;
+
+                        cert
+                    },
+                    Some(CertificateChoices::ExtendedCertificate(_)) => unimplemented!("Documents that use a ExtendedCertificate (obsolete) as a Document Signer Certificate are not supported"),
+                    Some(CertificateChoices::V2AttributeCertificate(_)) => unimplemented!("Documents that use a V2AttributeCertificate certificate as a Document Signer Certificate are not supported"),
+                    Some(CertificateChoices::Other(_)) => unimplemented!("Documents that use unknown certificate as a Document Signer Certificate are not supported"),
+                    None => unimplemented!("Documents that do not include a Document Signer Certificate are not yet supported"),
                 }
-                info!("Document Signer Certificate signature verification result: {}", dsc_verification.0);
-                c
             },
-            None => unimplemented!("Documents that do not include a Document Signer Certificate are not yet supported, or the included certificate is not supported")
+            None => unimplemented!("Documents that do not include a Document Signer Certificate are not yet supported, or the included certificate is not supported"),
         }
     };
 
@@ -2279,7 +2431,8 @@ pub fn passive_authentication(
     // <https://datatracker.ietf.org/doc/html/rfc3369#section-5.4>
     //
     // Message Digest Calculation Process as specified in RFC 3369
-    let lds_security_object_hash = use_digestalg(&mut *digest_algorithm, &lds_security_object_bytes);
+    let lds_security_object_hash =
+        use_digestalg(&mut *digest_algorithm, &lds_security_object_bytes);
 
     if lds_security_object_hash.ne(&message_digest) {
         error!("Digest of LDSSecurityObject does not match with the digest in SignedAttributes");
@@ -2308,23 +2461,26 @@ pub fn passive_authentication(
     // Follows RFC 3369 Section 5.6 Signature Verification Process
     // <https://datatracker.ietf.org/doc/html/rfc3369#section-5.6>
     let _signature_algorithm = &signer_info.signature_algorithm;
-    let signature = &signer_info.signature;
-    let pub_key = dsc.public_key().map_err(EmrtdError::OpensslErrorStack)?;
-    let mut verifier =
-        Verifier::new(digest_algorithm, &pub_key).map_err(EmrtdError::OpensslErrorStack)?;
-    verifier
-        .update(&signed_attrs_bytes)
-        .map_err(EmrtdError::OpensslErrorStack)?;
-    let sig_verified = verifier
-        .verify(signature)
-        .map_err(EmrtdError::OpensslErrorStack)?;
-    info!("Signature verification: {sig_verified}");
+    let signature = der::encode(&signer_info.signature).map_err(EmrtdError::RasnEncodeError)?;
+    // let pub_key = dsc.public_key().map_err(EmrtdError::OpensslErrorStack)?;
+    // let mut verifier =
+    //     Verifier::new(digest_algorithm, &pub_key).map_err(EmrtdError::OpensslErrorStack)?;
+    // verifier
+    //     .update(&signed_attrs_bytes)
+    //     .map_err(EmrtdError::OpensslErrorStack)?;
+    // let sig_verified = verifier
+    //     .verify(signature)
+    //     .map_err(EmrtdError::OpensslErrorStack)?;
 
-    if !sig_verified {
-        error!("Signature verification failure during EF.SOD parsing");
-        return Err(EmrtdError::VerifySignatureError(
-            "Signature verification failure during EF.SOD parsing",
-        ));
+    let signed_attrs_bytes_hash = use_digestalg(&mut *digest_algorithm, &signed_attrs_bytes);
+    match verify_signature(&dsc, &signed_attrs_bytes_hash, &signature) {
+        Ok(_) => info!("EF.SOD signature verification successful"),
+        Err(_) => {
+            error!("Signature verification failure during EF.SOD parsing!");
+            return Err(EmrtdError::VerifySignatureError(
+                "Signature verification failure during EF.SOD parsing",
+            ));
+        },
     }
 
     // Parse the eContent
@@ -2698,14 +2854,22 @@ impl APDU {
 /// pcsc card functions used in EmrtdComms
 pub trait EmrtdCard {
     fn get_attribute_owned(&self, attribute: pcsc::Attribute) -> Result<Vec<u8>, pcsc::Error>;
-    fn transmit<'buf>(&self, send_buffer: &[u8], receive_buffer: &'buf mut [u8]) -> Result<&'buf [u8], pcsc::Error>;
+    fn transmit<'buf>(
+        &self,
+        send_buffer: &[u8],
+        receive_buffer: &'buf mut [u8],
+    ) -> Result<&'buf [u8], pcsc::Error>;
 }
 
 impl EmrtdCard for pcsc::Card {
     fn get_attribute_owned(&self, attribute: pcsc::Attribute) -> Result<Vec<u8>, pcsc::Error> {
         self.get_attribute_owned(attribute)
     }
-    fn transmit<'buf>(&self, send_buffer: &[u8], receive_buffer: &'buf mut [u8]) -> Result<&'buf [u8], pcsc::Error> {
+    fn transmit<'buf>(
+        &self,
+        send_buffer: &[u8],
+        receive_buffer: &'buf mut [u8],
+    ) -> Result<&'buf [u8], pcsc::Error> {
         self.transmit(send_buffer, receive_buffer)
     }
 }
@@ -2789,7 +2953,7 @@ impl<C: EmrtdCard, R: RngCore + CryptoRng> EmrtdComms<C, R> {
     /// * `EmrtdError` in case of failure during sending or receiving an APDU.
     pub fn send(&mut self, apdu: &APDU, secure: bool) -> Result<(Vec<u8>, [u8; 2]), EmrtdError> {
         let mut apdu = apdu.clone();
-        
+
         // Sending APDU in plaintext
         if !secure {
             let mut apdu_bytes = vec![];
@@ -3501,11 +3665,15 @@ mod tests {
     impl EmrtdCard for MockCard {
         fn get_attribute_owned(&self, attribute: pcsc::Attribute) -> Result<Vec<u8>, pcsc::Error> {
             if attribute == AtrString {
-                return Ok(hex!("0001020304050607").to_vec())
+                return Ok(hex!("0001020304050607").to_vec());
             }
-            return Err(pcsc::Error::InvalidAtr)
+            return Err(pcsc::Error::InvalidAtr);
         }
-        fn transmit<'buf>(&self, send_buffer: &[u8], _receive_buffer: &'buf mut [u8]) -> Result<&'buf [u8], pcsc::Error> {
+        fn transmit<'buf>(
+            &self,
+            send_buffer: &[u8],
+            _receive_buffer: &'buf mut [u8],
+        ) -> Result<&'buf [u8], pcsc::Error> {
             // Examples taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix D.3 & D.4
             // Select eMRTD application
             if send_buffer == hex!("00A4040C07A0000002471001") {
@@ -3514,20 +3682,31 @@ mod tests {
             } else if send_buffer == hex!("0084000008") {
                 return Ok(&hex!("4608F91988702212 9000"));
             // EXTERNAL AUTHENTICATE command
-            } else if send_buffer == hex!("0082000028 72C29C2371CC9BDB65B779B8E8D37B29ECC154AA
-                                        56A8799FAE2F498F76ED92F25F1448EEA8AD90A7 28") {
-                return Ok(&hex!("46B9342A41396CD7386BF5803104D7CEDC122B91
-                                32139BAF2EEDC94EE178534F2F2D235D074D7449 9000"));
+            } else if send_buffer
+                == hex!(
+                    "0082000028 72C29C2371CC9BDB65B779B8E8D37B29ECC154AA
+                                        56A8799FAE2F498F76ED92F25F1448EEA8AD90A7 28"
+                )
+            {
+                return Ok(&hex!(
+                    "46B9342A41396CD7386BF5803104D7CEDC122B91
+                                32139BAF2EEDC94EE178534F2F2D235D074D7449 9000"
+                ));
             // Select EF.COM command
-            } else if send_buffer == hex!("0CA4020C158709016375432908C0 44F68E08BF8B92D635FF24F800") {
-                return Ok(&hex!("990290008E08FA855A5D4C50A8ED 9000"))
+            } else if send_buffer == hex!("0CA4020C158709016375432908C0 44F68E08BF8B92D635FF24F800")
+            {
+                return Ok(&hex!("990290008E08FA855A5D4C50A8ED 9000"));
             // Read Binary of first four bytes
             } else if send_buffer == hex!("0CB000000D9701048E08ED6705417E96BA5500") {
-                return Ok(&hex!("8709019FF0EC34F992265199029000 8E08AD55CC17140B2DED 9000"))
+                return Ok(&hex!(
+                    "8709019FF0EC34F992265199029000 8E08AD55CC17140B2DED 9000"
+                ));
             // Read Binary of remaining 18 bytes from offset 4
             } else if send_buffer == hex!("0CB000040D9701128E082EA28A70F3C7B53500") {
-                return Ok(&hex!("871901FB9235F4E4037F2327DCC8964F1F9B8C30F42
-                                C8E2FFF224A990290008E08C8B2787EAEA07D749000"))
+                return Ok(&hex!(
+                    "871901FB9235F4E4037F2327DCC8964F1F9B8C30F42
+                                C8E2FFF224A990290008E08C8B2787EAEA07D749000"
+                ));
             } else {
                 // Return some random error
                 return Err(pcsc::Error::CancelledByUser);
@@ -3543,10 +3722,7 @@ mod tests {
 
     impl MockCryptoRng {
         fn new(data: Vec<u8>) -> MockCryptoRng {
-            MockCryptoRng {
-                data,
-                index: 0,
-            }
+            MockCryptoRng { data, index: 0 }
         }
     }
 
@@ -3630,15 +3806,16 @@ mod tests {
     #[test]
     fn test_other_mrz_invalid_input() -> Result<(), EmrtdError> {
         let result = other_mrz("L898902C300000000000000", "740812", "120415");
-        assert!(
-            result.is_err_and(|e| matches!(e, EmrtdError::ParseMrzFieldError("Document number", _)))
-        );
+        assert!(result
+            .is_err_and(|e| matches!(e, EmrtdError::ParseMrzFieldError("Document number", _))));
 
         let result = other_mrz("L898902C3", "7408121", "120415");
         assert!(result.is_err_and(|e| matches!(e, EmrtdError::ParseMrzFieldError("Birth date", _))));
 
         let result = other_mrz("L898902C3", "740812", "1204151");
-        assert!(result.is_err_and(|e| matches!(e, EmrtdError::ParseMrzFieldError("Expiry date", _))));
+        assert!(
+            result.is_err_and(|e| matches!(e, EmrtdError::ParseMrzFieldError("Expiry date", _)))
+        );
 
         Ok(())
     }
@@ -3911,7 +4088,10 @@ mod tests {
         )?;
         // Get hash itself somehow and assert
         let digest = use_digestalg(&mut *result, &hex!("DEADBEEF"));
-        assert_eq!(digest, &hex!("5F78C33274E43FA9DE5659265C1D917E25C03722DCB0B8D27DB8D5FEAA813953"));
+        assert_eq!(
+            digest,
+            &hex!("5F78C33274E43FA9DE5659265C1D917E25C03722DCB0B8D27DB8D5FEAA813953")
+        );
 
         Ok(())
     }
@@ -3924,6 +4104,15 @@ mod tests {
             oid2digestalg(&rasn::types::ObjectIdentifier::new(vec![1, 3, 36, 3, 2, 3]).unwrap());
 
         assert!(result.is_err_and(|e| matches!(e, EmrtdError::InvalidOidError())));
+        Ok(())
+    }
+
+    #[cfg(feature = "passive_auth")]
+    #[test]
+    fn test_parse_master_list() -> Result<(), EmrtdError> {
+        let master_list = include_bytes!("../data/DE_ML_2024-04-10-10-54-13.ml");
+        parse_master_list(master_list)?;
+
         Ok(())
     }
 
@@ -3946,8 +4135,8 @@ mod tests {
 
         let mock_card = MockCard {};
         // Examples taken from https://www.icao.int/publications/Documents/9303_p11_cons_en.pdf Appendix D.3 & D.4
-        let mock_crypto_rng = MockCryptoRng::new(
-            hex!("781723860C06C226 0B795240CB7049B01C19B33E32804F0B").to_vec());
+        let mock_crypto_rng =
+            MockCryptoRng::new(hex!("781723860C06C226 0B795240CB7049B01C19B33E32804F0B").to_vec());
         let mut sm_object = EmrtdComms::<MockCard, MockCryptoRng>::new(mock_card, mock_crypto_rng);
         let result = sm_object.get_atr()?;
         assert_eq!(&result, &hex!("0001020304050607"));
@@ -3957,8 +4146,14 @@ mod tests {
         sm_object.establish_bac_session_keys(b"L898902C<369080619406236")?;
 
         // ks_enc is a DES key in case of BAC and the third BAC key is empty (repeats the first key)
-        assert_eq!(*sm_object.ks_enc.as_ref().unwrap(), hex!("979EC13B1CBFE9DCD01AB0FED307EAE5 979EC13B1CBFE9DC"));
-        assert_eq!(*sm_object.ks_mac.as_ref().unwrap(), hex!("F1CB1F1FB5ADF208806B89DC579DC1F8"));
+        assert_eq!(
+            *sm_object.ks_enc.as_ref().unwrap(),
+            hex!("979EC13B1CBFE9DCD01AB0FED307EAE5 979EC13B1CBFE9DC")
+        );
+        assert_eq!(
+            *sm_object.ks_mac.as_ref().unwrap(),
+            hex!("F1CB1F1FB5ADF208806B89DC579DC1F8")
+        );
         assert_eq!(*sm_object.ssc.as_ref().unwrap(), hex!("887022120C06C226"));
 
         sm_object.select_ef(&hex!("011E"), "EF.COM", true)?;

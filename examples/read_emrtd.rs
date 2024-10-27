@@ -101,7 +101,7 @@ fn main() -> Result<(), EmrtdError> {
             csca_cert_store.all_certificates().len()
         );
         result = passive_authentication(&ef_sod, &csca_cert_store).unwrap();
-        info!("{:?} {:?} {:?}", result.0.type_(), result.1, result.2);
+        info!("{:?} {:?}", result.1, result.2);
     }
 
     // Read EF.DG1
@@ -109,14 +109,14 @@ fn main() -> Result<(), EmrtdError> {
     let ef_dg1 = sm_object.read_data_from_ef(true)?;
     info!("Data from the EF.DG1: {}", bytes2hex(&ef_dg1));
     #[cfg(feature = "passive_auth")]
-    validate_dg(&ef_dg1, 1, result.0, &result.1)?;
+    validate_dg(&ef_dg1, 1, result.0.clone(), &result.1)?;
 
     // Read EF.DG2
     sm_object.select_ef(b"\x01\x02", "EF.DG2", true)?;
     let ef_dg2 = sm_object.read_data_from_ef(true)?;
     info!("Data from the EF.DG2: {}", bytes2hex(&ef_dg2));
     #[cfg(feature = "passive_auth")]
-    validate_dg(&ef_dg2, 2, result.0, &result.1)?;
+    validate_dg(&ef_dg2, 2, result.0.clone(), &result.1)?;
 
     let jpeg = get_jpeg_from_ef_dg2(&ef_dg2)?;
     std::fs::write("face.jpg", jpeg).expect("Error writing file");

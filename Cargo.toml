@@ -30,6 +30,7 @@ openssl = { version = "0.10.66", features = ["vendored"], optional = true }
 rasn = { version = "0.16.6", optional = true}
 rasn-cms = { version = "0.16.6", optional = true}
 rasn-pkix = { version = "0.16.6", optional = true}
+num-bigint = "0.4.6"
 
 [dev-dependencies]
 hex-literal = "0.4.1"
