@@ -149,6 +149,9 @@ extern crate alloc;
 use alloc::{borrow::ToOwned, collections::BTreeMap, format, string::String, vec, vec::Vec};
 use cipher::{BlockDecryptMut, BlockEncryptMut, KeyInit, KeyIvInit};
 use constant_time_eq::constant_time_eq;
+use hex_literal::hex;
+use num_bigint::BigInt;
+use rasn_cms::AlgorithmIdentifier;
 use core::{
     fmt::{self, Debug, Write},
     iter, mem,
@@ -207,6 +210,7 @@ pub enum EmrtdError {
     DSCError(&'static str),
     InvalidCountryName(&'static str),
     Utf8Error(Utf8Error),
+    InvalidECParameters(&'static str, &'static str)
 }
 impl fmt::Display for EmrtdError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -271,6 +275,10 @@ impl fmt::Display for EmrtdError {
                 write!(f, "Country name is invalid: {error_msg}")
             },
             Self::Utf8Error(ref e) => fmt::Display::fmt(&e, f),
+            Self::InvalidECParameters(error_msg, curve) => {
+                write!(f, "ECParameters is invalid: {error_msg}: {curve}")
+            },
+
         }
     }
 }
@@ -426,6 +434,377 @@ pub mod csca_master_list {
         pub version: CscaMasterListVersion,
         pub cert_list: CscaMasterListCertList,
     }
+}
+
+/// Generated and edited using `rasn_compiler`
+/// <https://librasn.github.io>
+/// <https://docs.rs/rasn-compiler/latest/rasn_compiler/>
+///
+#[allow(clippy::doc_markdown)]
+/// https://www.bsi.bund.de/SharedDocs/Downloads/EN/BSI/Publications/TechGuidelines/TR03111/BSI-TR-03111_V-2-0_pdf.pdf?__blob=publicationFile&v=1
+///
+/// ECParameters DEFINITIONS IMPLICIT TAGS ::= BEGIN
+/// ECParameters ::= SEQUENCE {
+/// version INTEGER{ecpVer1(1)} (ecpVer1),
+/// fieldID FieldID,
+/// curve Curve,
+/// base ECPoint,
+/// order INTEGER,
+/// cofactor INTEGER OPTIONAL,
+/// ...
+/// }
+/// Curve ::= SEQUENCE {
+/// a FieldElement,
+/// b FieldElement,
+/// seed BIT STRING OPTIONAL
+/// }
+/// FieldElement ::= OCTET STRING
+/// ECPoint ::= OCTET STRING
+/// FieldID ::= SEQUENCE {
+/// fieldType OBJECT IDENTIFIER,
+/// parameters ANY DEFINED BY fieldType
+/// }
+///
+/// END
+
+#[cfg(feature = "passive_auth")]
+pub mod ec_parameters {
+    extern crate alloc;
+    use rasn::prelude::*;
+
+    pub type FieldElement = OctetString;
+    pub type ECPoint = OctetString;
+
+    #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+    pub struct Curve {
+        pub a: FieldElement,
+        pub b: FieldElement,
+        pub seed: Option<BitString>,
+    }
+    impl Curve {
+        pub fn new(a: FieldElement, b: FieldElement, seed: Option<BitString>) -> Self {
+            Self { a, b, seed }
+        }
+    }
+
+    #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+    pub struct FieldID {
+        #[rasn(identifier = "fieldType")]
+        pub field_type: ObjectIdentifier,
+        pub parameters: Any,
+    }
+    impl FieldID {
+        pub fn new(field_type: ObjectIdentifier, parameters: Any) -> Self {
+            Self {
+                field_type,
+                parameters,
+            }
+        }
+    }
+
+    #[derive(AsnType, Debug, Clone, Decode, Encode, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub struct ECParameters {
+        pub version: Integer,
+        #[rasn(identifier = "fieldID")]
+        pub field_id: FieldID,
+        pub curve: Curve,
+        pub base: ECPoint,
+        pub order: Integer,
+        pub cofactor: Option<Integer>,
+    }
+    impl ECParameters {
+        pub fn new(
+            version: Integer,
+            field_id: FieldID,
+            curve: Curve,
+            base: ECPoint,
+            order: Integer,
+            cofactor: Option<Integer>,
+        ) -> Self {
+            Self {
+                version,
+                field_id,
+                curve,
+                base,
+                order,
+                cofactor,
+            }
+        }
+
+
+    }
+}
+
+struct ECCurve {
+    name: &'static str,
+    p: BigInt,
+    a: BigInt,
+    b: BigInt,
+    x: BigInt,
+    y: BigInt,
+    q: BigInt,
+    h: BigInt
+}
+
+impl ECCurve {
+    fn new(name: &'static str, p: BigInt, a: BigInt, b: BigInt, x: BigInt, y: BigInt, q: BigInt, h: BigInt) -> Self {
+        Self { name, p, a, b, x, y, q, h }
+    }
+
+    // NIST SP 800-186 Section 3.2.1.2
+    // https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-186.pdf
+    fn secp224r1() -> Self {
+        let p = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000000000000000000000001"));
+        let h = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("01"));
+        let q = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("FFFFFFFFFFFFFFFFFFFFFFFFFFFF16A2E0B8F03E13DD29455C5C2A3D"));
+        let a = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFFFFFFFFFFFFFFFFFFFE"));
+        let b = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("B4050A850C04B3ABF54132565044B0B7D7BFD8BA270B39432355FFB4"));
+        let x = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("B70E0CBD6BB4BF7F321390B94A03C1D356C21122343280D6115C1D21"));
+        let y = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("BD376388B5F723FB4C22DFE6CD4375A05A07476444D5819985007E34"));
+
+        ECCurve::new("secp224r1" ,p, a, b, x, y, q, h)
+    }
+
+    // NIST SP 800-186 Section 3.2.1.3
+    // https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-186.pdf
+    fn secp256r1() -> Self {
+        let p = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("FFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF"));
+        let h = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("01"));
+        let q = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551"));
+        let a = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("FFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFC"));
+        let b = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B"));
+        let x = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296"));
+        let y = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5"));
+
+        ECCurve::new("secp256r1", p, a, b, x, y, q, h)
+    }
+
+    // NIST SP 800-186 Section 3.2.1.4
+    // https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-186.pdf
+    fn secp384r1() -> Self {
+        let p = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFFFF0000000000000000FFFFFFFF"));
+        let h = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("01"));
+        let q = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFC7634D81F4372DDF581A0DB248B0A77AECEC196ACCC52973"));
+        let a = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFFFF0000000000000000FFFFFFFC"));
+        let b = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("B3312FA7E23EE7E4988E056BE3F82D19181D9C6EFE8141120314088F5013875AC656398D8A2ED19D2A85C8EDD3EC2AEF"));
+        let x = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("AA87CA22BE8B05378EB1C71EF320AD746E1D3B628BA79B9859F741E082542A385502F25DBF55296C3A545E3872760AB7"));
+        let y = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("3617DE4A96262C6F5D9E98BF9292DC29F8F41DBD289A147CE9DA3113B5F0B8C00A60B1CE1D7E819D7A431D7C90EA0E5F"));
+
+        ECCurve::new("secp384r1", p, a, b, x, y, q, h)
+    }
+
+    // NIST SP 800-186 Section 3.2.1.5
+    // https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-186.pdf
+    fn secp521r1() -> Self {
+        let p = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"));
+        let h = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("01"));
+        let q = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFA51868783BF2F966B7FCC0148F709A5D03BB5C9B8899C47AEBB6FB71E91386409"));
+        let a = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFC"));
+        let b = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("51953EB9618E1C9A1F929A21A0B68540EEA2DA725B99B315F3B8B489918EF109E156193951EC7E937B1652C0BD3BB1BF073573DF883D2C34F1EF451FD46B503F00"));
+        let x = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("C6858E06B70404E9CD9E3ECB662395B4429C648139053FB521F828AF606B4D3DBAA14B5E77EFE75928FE1DC127A2FFA8DE3348B3C1856A429BF97E7E31C2E5BD66"));
+        let y = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("011839296A789A3BC0045C8A5FB42C7D1BD998F54449579B446817AFBD17273E662C97EE72995EF42640C550B9013FAD0761353C7086A272C24088BE94769FD16650"));
+
+        ECCurve::new("secp521r1", p, a, b, x, y, q, h)
+    }
+
+    // NIST SP 800-186 Section 3.2.1.6
+    // https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-186.pdf
+    fn w25519() -> Self{
+        let p = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFED"));
+        let h = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("08"));
+        let q = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("1000000000000000000000000000000014DEF9DEA2F79CD65812631A5CF5D3ED"));
+        let a = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA984914A144"));
+        let b = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("7B425ED097B425ED097B425ED097B425ED097B425ED097B4260B5E9C7710C864"));
+        let x = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD245A"));
+        let y = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("5F51E65E475F794B1FE122D388B72EB36DC2B28192839E4DD6163A5D81312C14"));
+
+        ECCurve::new("w25519", p, a, b, x, y, q, h)
+    }
+    // NIST SP 800-186 Section 3.2.1.7
+    // https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-186.pdf
+    fn w448() -> Self{
+        let p = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"));
+        let h = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("04"));
+        let q = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("3FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF7CCA23E9C44EDB49AED63690216CC2728DC58F552378C292AB5844F3"));
+        let a = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA9FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE1A76D41F"));
+        let b = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("5ED097B425ED097B425ED097B425ED097B425ED097B425ED097B425E71C71C71C71C71C71C71C71C71C71C71C71C71C71C72C87B7CC69F70"));
+        let x = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("111111111111111111111111111111111111111111111111111111110000000000000000000000000000000000000000000000000000145B"));
+        let y = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("7D235D1295F5B1F66C98AB6E58326FCECBAE5D34F55545D060F75DC28DF3F6EDB8027E2346430D211312C4B150677AF76FD7223D457B5B1A"));
+
+        ECCurve::new("w448", p, a, b, x, y, q, h)
+    }
+
+    // RFC 5639 Section 3.3
+    // https://datatracker.ietf.org/doc/html/rfc5639.html#section-3.7
+    fn brainpoolP224r1() -> Self {
+        let p = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("D7C134AA264366862A18302575D1D787B09F075797DA89F57EC8C0FF"));
+        let a = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("68A5E62CA9CE6C1C299803A6C1530B514E182AD8B0042A59CAD29F43"));
+        let b = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("2580F63CCFE44138870713B1A92369E33E2135D266DBB372386C400B"));
+        let x = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("0D9029AD2C7E5CF4340823B2A87DC68C9E4CE3174C1E6EFDEE12C07D"));
+        let y = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("58AA56F772C0726F24C6B89E4ECDAC24354B9E99CAA3F6D3761402CD"));
+        let q = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("D7C134AA264366862A18302575D0FB98D116BC4B6DDEBCA3A5A7939F"));
+        let h = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("01"));
+
+        ECCurve::new("brainpoolP224r1", p, a, b, x, y, q, h)
+    }
+
+    // RFC 5639 Section 3.4
+    // https://datatracker.ietf.org/doc/html/rfc5639.html#section-3.7
+    fn brainpoolP256r1() -> Self {
+        let p = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("A9FB57DBA1EEA9BC3E660A909D838D726E3BF623D52620282013481D1F6E5377"));
+        let a = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("7D5A0975FC2C3057EEF67530417AFFE7FB8055C126DC5C6CE94A4B44F330B5D9"));
+        let b = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("26DC5C6CE94A4B44F330B5D9BBD77CBF958416295CF7E1CE6BCCDC18FF8C07B6"));
+        let x = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("8BD2AEB9CB7E57CB2C4B482FFC81B7AFB9DE27E1E3BD23C23A4453BD9ACE3262"));
+        let y = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("547EF835C3DAC4FD97F8461A14611DC9C27745132DED8E545C1D54C72F046997"));
+        let q = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("A9FB57DBA1EEA9BC3E660A909D838D718C397AA3B561A6F7901E0E82974856A7"));
+        let h = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("01"));
+
+        ECCurve::new("brainpoolP256r1", p, a, b, x, y, q, h)
+    }
+
+    // RFC 5639 Section 3.5
+    // https://datatracker.ietf.org/doc/html/rfc5639.html#section-3.7
+    fn brainpoolP320r1() -> Self {
+        let p = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("D35E472036BC4FB7E13C785ED201E065F98FCFA6F6F40DEF4F92B9EC7893EC28FCD412B1F1B32E27"));
+        let a = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("3EE30B568FBAB0F883CCEBD46D3F3BB8A2A73513F5EB79DA66190EB085FFA9F492F375A97D860EB4"));
+        let b = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("520883949DFDBC42D3AD198640688A6FE13F41349554B49ACC31DCCD884539816F5EB4AC8FB1F1A6"));
+        let x = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("43BD7E9AFB53D8B85289BCC48EE5BFE6F20137D10A087EB6E7871E2A10A599C710AF8D0D39E20611"));
+        let y = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("14FDD05545EC1CC8AB4093247F77275E0743FFED117182EAA9C77877AAAC6AC7D35245D1692E8EE1"));
+        let q = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("D35E472036BC4FB7E13C785ED201E065F98FCFA5B68F12A32D482EC7EE8658E98691555B44C59311"));
+        let h = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("01"));
+
+        ECCurve::new("brainpoolP320r1", p, a, b, x, y, q, h)
+    }
+
+    // RFC 5639 Section 3.6
+    // https://datatracker.ietf.org/doc/html/rfc5639.html#section-3.7
+    fn brainpoolP384r1() -> Self {
+        let p = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("8CB91E82A3386D280F5D6F7E50E641DF152F7109ED5456B412B1DA197FB71123ACD3A729901D1A71874700133107EC53"));
+        let a = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("7BC382C63D8C150C3C72080ACE05AFA0C2BEA28E4FB22787139165EFBA91F90F8AA5814A503AD4EB04A8C7DD22CE2826"));
+        let b = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("04A8C7DD22CE28268B39B55416F0447C2FB77DE107DCD2A62E880EA53EEB62D57CB4390295DBC9943AB78696FA504C11"));
+        let x = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("1D1C64F068CF45FFA2A63A81B7C13F6B8847A3E77EF14FE3DB7FCAFE0CBD10E8E826E03436D646AAEF87B2E247D4AF1E"));
+        let y = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("8ABE1D7520F9C2A45CB1EB8E95CFD55262B70B29FEEC5864E19C054FF99129280E4646217791811142820341263C5315"));
+        let q = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("8CB91E82A3386D280F5D6F7E50E641DF152F7109ED5456B31F166E6CAC0425A7CF3AB6AF6B7FC3103B883202E9046565"));
+        let h = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("01"));
+
+        ECCurve::new("brainpoolP384r1", p, a, b, x, y, q, h)
+    }
+
+    // RFC 5639 Section 3.7
+    // https://datatracker.ietf.org/doc/html/rfc5639.html#section-3.7
+    fn brainpoolP512r1() -> Self {
+        let p = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("AADD9DB8DBE9C48B3FD4E6AE33C9FC07CB308DB3B3C9D20ED6639CCA703308717D4D9B009BC66842AECDA12AE6A380E62881FF2F2D82C68528AA6056583A48F3"));
+        let a = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("7830A3318B603B89E2327145AC234CC594CBDD8D3DF91610A83441CAEA9863BC2DED5D5AA8253AA10A2EF1C98B9AC8B57F1117A72BF2C7B9E7C1AC4D77FC94CA"));
+        let b = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("3DF91610A83441CAEA9863BC2DED5D5AA8253AA10A2EF1C98B9AC8B57F1117A72BF2C7B9E7C1AC4D77FC94CADC083E67984050B75EBAE5DD2809BD638016F723"));
+        let x = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("81AEE4BDD82ED9645A21322E9C4C6A9385ED9F70B5D916C1B43B62EEF4D0098EFF3B1F78E2D0D48D50D1687B93B97D5F7C6D5047406A5E688B352209BCB9F822"));
+        let y = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("7DDE385D566332ECC0EABFA9CF7822FDF209F70024A57B1AA000C55B881F8111B2DCDE494A5F485E5BCA4BD88A2763AED1CA2B2FA8F0540678CD1E0F3AD80892"));
+        let q = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("AADD9DB8DBE9C48B3FD4E6AE33C9FC07CB308DB3B3C9D20ED6639CCA70330870553E5C414CA92619418661197FAC10471DB1D381085DDADDB58796829CA90069"));
+        let h = num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &hex!("01"));
+
+        ECCurve::new("brainpoolP512r1", p, a, b, x, y, q, h)
+    }
+}
+
+fn ec_params_general_check(ec_parameters: &ec_parameters::ECParameters) -> Result<(), EmrtdError> {
+    if ec_parameters.version.ne(&rasn::types::Integer::from(1)) {
+        return Err(EmrtdError::InvalidECParameters("ECParameters version must be 1", ""));
+    }
+
+    // ICAO Doc 9303-12 Section 4.1.6.3
+    // <https://www.icao.int/publications/Documents/9303_p12_cons_en.pdf>
+    // > ... MUST include the optional co-factor.
+    if ec_parameters.cofactor.is_none() {
+        return Err(EmrtdError::InvalidECParameters("ECParameters must contain Optional Cofactor", ""));
+    }
+
+    Ok(())
+}
+
+fn ec_params_is_curve(ec_parameters: &ec_parameters::ECParameters, curve: ECCurve) -> Result<(), EmrtdError> {
+    ec_params_general_check(ec_parameters)?;
+
+    // https://www.bsi.bund.de/SharedDocs/Downloads/EN/BSI/Publications/TechGuidelines/TR03111/BSI-TR-03111_V-2-0_pdf.pdf?__blob=publicationFile&v=1
+    //
+    // ansi-X9-62 OBJECT IDENTIFIER ::= { iso(1) member-body(2) us(840) 10045 }
+    // id-fieldType OBJECT IDENTIFER ::= { ansi-X9-62 fieldType(1) }
+    // prime-field OBJECT IDENTIFIER ::= { id-fieldType 1 }
+    if Oid::const_new(&[1, 2, 840, 10045, 1, 1]).ne(&ec_parameters.field_id.field_type) {
+        return Err(EmrtdError::InvalidECParameters("Only ECParameters with Field Type `prime-field` is supported", ""));
+    }
+
+    {
+        let self_p_bytes = der::encode(&ec_parameters.field_id.parameters).map_err(EmrtdError::RasnEncodeError)?;
+        let self_p = der::decode::<rasn::prelude::Integer>(&self_p_bytes).map_err(EmrtdError::RasnDecodeError)?;
+
+        if self_p.ne(&curve.p) {
+            return Err(EmrtdError::InvalidECParameters("Wrong prime in ECParameters for curve", &curve.name));
+        }
+    }
+    {
+        // For some reason self_curve_a contains tag and length (04 xx)
+        let self_curve_a = der::encode(&ec_parameters.curve.a).map_err(EmrtdError::RasnEncodeError)?;
+        validate_asn1_tag(&self_curve_a, b"\x04")?;
+        let (self_curve_a, _) = get_asn1_child(&self_curve_a, 1)?;
+
+        if num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &self_curve_a).ne(&curve.a) {
+            return Err(EmrtdError::InvalidECParameters("Wrong curve A in ECParameters for curve", &curve.name));
+        }
+    }
+    {
+        // For some reason self_curve_b contains tag and length (04 xx)
+        let self_curve_b = der::encode(&ec_parameters.curve.b).map_err(EmrtdError::RasnEncodeError)?;
+        validate_asn1_tag(&self_curve_b, b"\x04")?;
+        let (tl_len, value_len) = len2int(&self_curve_b, 1)?;
+
+        if num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &self_curve_b[tl_len..tl_len + value_len]).ne(&curve.b) {
+            return Err(EmrtdError::InvalidECParameters("Wrong curve B in ECParameters for curve", &curve.name));
+        }
+    }
+    {
+        // For some reason self_base contains tag and length (04 xx)
+        let self_base = der::encode(&ec_parameters.base).map_err(EmrtdError::RasnEncodeError)?;
+        validate_asn1_tag(&self_base, b"\x04")?;
+        let (self_base, _) = get_asn1_child(&self_base, 1)?;
+
+        // ICAO Doc 9303-12 Section 4.1.6.3
+        // <https://www.icao.int/publications/Documents/9303_p12_cons_en.pdf>
+        // > ECPoints MUST be in uncompressed format.
+        //
+        // Uncompressed format is explained in
+        // <https://www.bsi.bund.de/SharedDocs/Downloads/EN/BSI/Publications/TechGuidelines/TR03111/BSI-TR-03111_V-2-0_pdf.pdf?__blob=publicationFile&v=1>
+        if self_base.len() < 2 || self_base.len() % 2 != 1 {
+            return Err(EmrtdError::InvalidECParameters("Invalid ECParams in ECParameters for curve", &curve.name));
+        }
+        if self_base[0] != 0x4 {
+            return Err(EmrtdError::InvalidECParameters("ECParams must be in uncompressed format in ECParameters for curve", &curve.name));
+        }
+        let x_y_len = (self_base.len() - 1) / 2;
+        let self_base_x = &self_base[1..1+x_y_len];
+
+        if num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &self_base_x).ne(&curve.x) {
+            return Err(EmrtdError::InvalidECParameters("Wrong base X in ECParameters for curve", &curve.name));
+        }
+        let self_base_y = &self_base[1+x_y_len..];
+        if num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, &self_base_y).ne(&curve.y) {
+            return Err(EmrtdError::InvalidECParameters("Wrong base Y in ECParameters for curve", &curve.name));
+        }
+    }
+
+    if ec_parameters.order.ne(&curve.q) {
+        return Err(EmrtdError::InvalidECParameters("Wrong order in ECParameters for curve", &curve.name));
+    }
+    match &ec_parameters.cofactor {
+        Some(cofactor) => {
+            if cofactor.ne(&curve.h) {
+                return Err(EmrtdError::InvalidECParameters("Wrong cofactor in ECParameters for curve", &curve.name));
+            }
+        },
+        None => return Err(EmrtdError::InvalidECParameters("ECParameters must contain Optional Cofactor", "")),
+    }
+
+    Ok(())
+
 }
 
 /// Calculates the check digit for the given data using a specific algorithm.
@@ -1510,12 +1889,14 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
                 match possible_csca_cert {
                     Some(csca_cert) => {
                         let csca_cert_signature = der::encode(&csca_cert.signature_value).map_err(EmrtdError::RasnEncodeError)?;
-                        match verify_signature(&csca_cert, todo!(), &csca_cert_signature) {
+                        let csca_tbs_cert = der::encode(&csca_cert.tbs_certificate).map_err(EmrtdError::RasnEncodeError)?;
+                        match verify_signature(&csca_cert, &csca_cert.signature_algorithm, &csca_tbs_cert, &csca_cert_signature) {
                             Ok(_) => info!("Self signed CSCA Certificate signature is valid"),
                             Err(_) => warn!("Self signed CSCA Certificate signature is invalid"),
                         }
                         let master_list_signer_cert_signature = der::encode(&master_list_signer_cert.signature_value).map_err(EmrtdError::RasnEncodeError)?;
-                        match verify_signature(&csca_cert, todo!(), &master_list_signer_cert_signature) {
+                        let master_list_signer_tbs_cert = der::encode(&master_list_signer_cert.tbs_certificate).map_err(EmrtdError::RasnEncodeError)?;
+                        match verify_signature(&csca_cert, &master_list_signer_cert.signature_algorithm, &master_list_signer_tbs_cert, &master_list_signer_cert_signature) {
                             Ok(_) => info!("Master List Signer Certificate signature is valid"),
                             Err(_) => warn!("Master List Signer Certificate signature is invalid"),
                         }
@@ -1791,7 +2172,7 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
     // Signature Verification
     // Follows RFC 5652 Section 5.6 Signature Verification Process
     // <https://datatracker.ietf.org/doc/html/rfc5652#section-5.6>
-    let _signature_algorithm = &signer_info.signature_algorithm;
+    let signature_algorithm = &signer_info.signature_algorithm;
     let signature = der::encode(&signer_info.signature).map_err(EmrtdError::RasnEncodeError)?;
     info!("{:?}", master_list_signer);
     // let pub_key = master_list_signer
@@ -1807,11 +2188,11 @@ pub fn parse_master_list(master_list: &[u8]) -> Result<X509Store, EmrtdError> {
     //     .map_err(EmrtdError::OpensslErrorStack)?;
 
     let signed_attrs_bytes_hash = use_digestalg(&mut *digest_algorithm, &signed_attrs_bytes);
-    match verify_signature(&master_list_signer, &signed_attrs_bytes_hash, &signature) {
+    match verify_signature(&master_list_signer, signature_algorithm, &signed_attrs_bytes_hash, &signature) {
         Ok(_) => info!("Master List signature verification successful"),
-        Err(_) => {
-            error!("Signature verification failure during Master List parsing!");
-
+        Err(e) => {
+            print!("Signature verification failure during Master List parsing! {}", e);
+            return Err(EmrtdError::VerifySignatureError("Signature verification failure during Master List parsing!"));
         },
     }
 
@@ -1952,14 +2333,14 @@ fn check_validity(validity: &Validity) -> Result<(), EmrtdError> {
         // <https://www.icao.int/publications/Documents/9303_p12_cons_en.pdf>
         // > Dates through 2049 MUST be in UTCTime UTCTime MUST be represented as YYMMDDHHMMSSZ
         rasn_pkix::Time::Utc(date_time) => {
-            todo!()
+            // todo!()
         },
         // ICAO Doc 9303-12 Section 7
         // <https://www.icao.int/publications/Documents/9303_p12_cons_en.pdf>
         // > Dates in 2050 and beyond MUST be in GeneralizedTime. GeneralizedTime MUST NOT have fractional seconds
         // > GeneralizedTime MUST be represented as YYYYMMDDHHMMSSZ
         rasn_pkix::Time::General(date_time) => {
-            todo!()
+            // todo!()
         },
     }
 
@@ -2004,8 +2385,75 @@ fn check_certificate_common_values(cert: &Certificate) -> Result<(), EmrtdError>
     Ok(())
 }
 
-fn verify_signature(issuer: &Certificate, hashed_data: &[u8], signature: &[u8]) -> Result<(), EmrtdError> {
+fn verify_signature(issuer: &Certificate, signature_alg: &AlgorithmIdentifier, data: &[u8], signature: &[u8]) -> Result<(), EmrtdError> {
+    let mut digester: Box<dyn DynDigest>;
+    // ecdsa-with-SHA224
+    if Oid::const_new(&[1, 2, 840, 10045, 4, 3, 1]).eq(&signature_alg.algorithm) {
+        digester = Box::new(sha2::Sha224::default());
+    }
+    // ecdsa-with-SHA256
+    else if Oid::const_new(&[1, 2, 840, 10045, 4, 3, 2]).eq(&signature_alg.algorithm) {
+        digester = Box::new(sha2::Sha256::default());
+    }
+    // ecdsa-with-SHA384
+    else if Oid::const_new(&[1, 2, 840, 10045, 4, 3, 3]).eq(&signature_alg.algorithm) {
+        digester = Box::new(sha2::Sha384::default());
+    }
+    // ecdsa-with-SHA512
+    else if Oid::const_new(&[1, 2, 840, 10045, 4, 3, 4]).eq(&signature_alg.algorithm) {
+        digester = Box::new(sha2::Sha512::default());
+    }
+    else { // RSA or DSA
+        unimplemented!()
+    }
 
+    let hashed_data = use_digestalg(&mut *digester, data);
+
+    // ICAO Doc 9303-12 Section 4.1.6.3
+    // <https://www.icao.int/publications/Documents/9303_p12_cons_en.pdf>
+    // id-ecPublicKey
+    //
+    // > Those issuing States or organizations implementing ECDSA for signature generation or verification SHALL use [X9.62] or
+    // > [ISO/IEC 15946]. The elliptic curve domain parameters used to generate the ECDSA key pair MUST be described explicitly
+    // > in the parameters of the public key, i.e. parameters MUST be of type ECParameters (no named curves, no implicit
+    // > parameters) and MUST include the optional co-factor. ECPoints MUST be in uncompressed format.
+    // >
+    // > It is RECOMMENDED that the guideline [TR 03111] be followed.
+    if Oid::const_new(&[1, 2, 840, 10045, 2, 1]).eq(&issuer.tbs_certificate.subject_public_key_info.algorithm.algorithm) {
+        let encoded_ec_params = der::encode(&issuer.tbs_certificate.subject_public_key_info.algorithm.parameters).map_err(EmrtdError::RasnEncodeError)?;
+        let decoded_ec_params = der::decode::<ec_parameters::ECParameters>(&encoded_ec_params).map_err(EmrtdError::RasnDecodeError)?;
+
+        if ec_params_is_curve(&decoded_ec_params, ECCurve::secp224r1()).is_ok() {
+            info!("Certificate uses secp224r1");
+        } else if ec_params_is_curve(&decoded_ec_params, ECCurve::secp256r1()).is_ok() {
+            info!("Certificate uses secp256r1");
+        } else if ec_params_is_curve(&decoded_ec_params, ECCurve::secp384r1()).is_ok() {
+            info!("Certificate uses secp384r1");
+        } else if ec_params_is_curve(&decoded_ec_params, ECCurve::secp521r1()).is_ok() {
+            info!("Certificate uses secp521r1");
+        } else if ec_params_is_curve(&decoded_ec_params, ECCurve::w25519()).is_ok() {
+            info!("Certificate uses w25519");
+        } else if ec_params_is_curve(&decoded_ec_params, ECCurve::w448()).is_ok() {
+            info!("Certificate uses w448");
+        } else if ec_params_is_curve(&decoded_ec_params, ECCurve::brainpoolP224r1()).is_ok() {
+            info!("Certificate uses brainpoolP224r1");
+        } else if ec_params_is_curve(&decoded_ec_params, ECCurve::brainpoolP256r1()).is_ok() {
+            info!("Certificate uses brainpoolP256r1");
+        } else if ec_params_is_curve(&decoded_ec_params, ECCurve::brainpoolP320r1()).is_ok() {
+            info!("Certificate uses brainpoolP320r1");
+        } else if ec_params_is_curve(&decoded_ec_params, ECCurve::brainpoolP384r1()).is_ok() {
+            info!("Certificate uses brainpoolP384r1");
+        } else if ec_params_is_curve(&decoded_ec_params, ECCurve::brainpoolP512r1()).is_ok() {
+            info!("Certificate uses brainpoolP512r1");
+        } else {
+            unimplemented!();
+        }
+    }
+    else {
+        unimplemented!()
+    }
+
+    // Use the Curve and the hashed_data and the signature to verify the signature
     todo!();
 
     Ok(())
@@ -2460,7 +2908,7 @@ pub fn passive_authentication(
     // Signature Verification
     // Follows RFC 3369 Section 5.6 Signature Verification Process
     // <https://datatracker.ietf.org/doc/html/rfc3369#section-5.6>
-    let _signature_algorithm = &signer_info.signature_algorithm;
+    let signature_algorithm = &signer_info.signature_algorithm;
     let signature = der::encode(&signer_info.signature).map_err(EmrtdError::RasnEncodeError)?;
     // let pub_key = dsc.public_key().map_err(EmrtdError::OpensslErrorStack)?;
     // let mut verifier =
@@ -2473,7 +2921,7 @@ pub fn passive_authentication(
     //     .map_err(EmrtdError::OpensslErrorStack)?;
 
     let signed_attrs_bytes_hash = use_digestalg(&mut *digest_algorithm, &signed_attrs_bytes);
-    match verify_signature(&dsc, &signed_attrs_bytes_hash, &signature) {
+    match verify_signature(&dsc, signature_algorithm, &signed_attrs_bytes_hash, &signature) {
         Ok(_) => info!("EF.SOD signature verification successful"),
         Err(_) => {
             error!("Signature verification failure during EF.SOD parsing!");
@@ -4110,6 +4558,10 @@ mod tests {
     #[cfg(feature = "passive_auth")]
     #[test]
     fn test_parse_master_list() -> Result<(), EmrtdError> {
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .init();
+
         let master_list = include_bytes!("../data/DE_ML_2024-04-10-10-54-13.ml");
         parse_master_list(master_list)?;
 
